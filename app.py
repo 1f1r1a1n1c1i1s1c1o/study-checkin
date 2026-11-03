@@ -71,6 +71,7 @@ def init_db(db):
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT")
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'")
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS webhook_url TEXT")
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS makeup_cards INTEGER DEFAULT 0")
         else:
             try: db.execute("ALTER TABLE users ADD COLUMN security_question TEXT")
             except: pass
@@ -80,11 +81,13 @@ def init_db(db):
             except: pass
             try: db.execute("ALTER TABLE users ADD COLUMN webhook_url TEXT")
             except: pass
+            try: db.execute("ALTER TABLE users ADD COLUMN makeup_cards INTEGER DEFAULT 0")
+            except: pass
         db.commit()
     except Exception: pass
 
     tables = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT)",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
         "CREATE TABLE IF NOT EXISTS period_bonus (period_key TEXT, owner_id TEXT, kind TEXT, points REAL, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS redemptions (id SERIAL PRIMARY KEY, owner_id TEXT, item TEXT, cost REAL, ts TEXT)",
@@ -641,30 +644,34 @@ def main():
     user_names = [u["username"] for u in all_users_data]
 
     # ================= 主动提醒逻辑 (方案五) =================
-    if current_role != "admin" or current_role == "admin":
-        try:
-            if now.hour >= 21:
-                today_record = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), current_user)).fetchone()
-                if not today_record and user_row.get("webhook_url") and st.session_state.get(f"alerted_{today}") != True:
-                    url = user_row["webhook_url"]
-                    if "bark" in url:
-                        requests.get(f"{url}/今天还没打卡哦，连续记录快断了！", timeout=3)
-                    elif "serverchan" in url:
-                        requests.post(url, data={"title": "学习打卡提醒", "desp": "今天还没打卡哦，快去保住你的积分和连击！"}, timeout=3)
-                    else:
-                        requests.get(url, timeout=3)
-                    st.session_state[f"alerted_{today}"] = True
-        except Exception:
-            pass
+    try:
+        if now.hour >= 21:
+            today_record = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), current_user)).fetchone()
+            if not today_record and user_row.get("webhook_url") and st.session_state.get(f"alerted_{today}") != True:
+                url = user_row["webhook_url"]
+                if "bark" in url:
+                    requests.get(f"{url}/今天还没打卡哦，连续记录快断了！", timeout=3)
+                elif "serverchan" in url:
+                    requests.post(url, data={"title": "学习打卡提醒", "desp": "今天还没打卡哦，快去保住你的积分和连击！"}, timeout=3)
+                else:
+                    requests.get(url, timeout=3)
+                st.session_state[f"alerted_{today}"] = True
+    except Exception:
+        pass
 
     with st.sidebar:
         st.title("学习打卡")
+        
+        # 方案六：手机精简模式开关
+        is_mobile_mode = st.checkbox("📱 手机精简模式", value=False, help="开启后隐藏复杂图表，只保留核心打卡功能")
+        
         if current_role == "admin":
             view_as = st.selectbox("管理员特权：切换账号", user_names, index=user_names.index(current_user) if current_user in user_names else 0)
         else:
             view_as = current_user
         
-        st.info(f"当前身份：{html.escape(view_as)} ({current_role})\n\n北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}")
+        makeup_cards = user_row.get("makeup_cards") or 0
+        st.info(f"当前身份：{html.escape(view_as)} ({current_role})\n\n北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{makeup_cards} 张")
         bal = get_balance(db, view_as)
         st.metric("当前可用积分", f"{bal['balance']:.1f}")
         
@@ -725,6 +732,25 @@ def main():
                 db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user))
                 db.commit(); st.success("保存成功！")
             
+            # 个人数据导出（所有人可用）
+            st.divider()
+            st.write("**个人数据导出**")
+            my_data = {
+                "daily_records": [dict(r) for r in db.execute("SELECT * FROM daily_records WHERE owner_id=?", (current_user,)).fetchall()],
+                "exam_rewards": [dict(r) for r in db.execute("SELECT * FROM exam_rewards WHERE owner_id=?", (current_user,)).fetchall()],
+                "redemptions": [dict(r) for r in db.execute("SELECT * FROM redemptions WHERE owner_id=?", (current_user,)).fetchall()],
+                "extra_points": [dict(r) for r in db.execute("SELECT * FROM extra_points WHERE owner_id=?", (current_user,)).fetchall()],
+                "special_events": [dict(r) for r in db.execute("SELECT * FROM special_events WHERE owner_id=?", (current_user,)).fetchall()]
+            }
+            json_str = json.dumps(my_data, ensure_ascii=False, indent=2, default=str)
+            st.download_button(
+                label="📥 下载我的个人备份 (JSON)",
+                data=json_str,
+                file_name=f"my_backup_{current_user}_{today.isoformat()}.json",
+                mime="application/json",
+                use_container_width=True
+            )
+
             # 全站数据导出（仅管理员）
             if current_role == "admin":
                 st.divider()
@@ -742,10 +768,10 @@ def main():
                     "config_exam": [dict(r) for r in db.execute("SELECT * FROM config_exam").fetchall()],
                     "config_badges": [dict(r) for r in db.execute("SELECT * FROM config_badges").fetchall()]
                 }
-                json_str = json.dumps(all_data, ensure_ascii=False, indent=2, default=str)
+                json_str_all = json.dumps(all_data, ensure_ascii=False, indent=2, default=str)
                 st.download_button(
                     label="📥 导出全站备份 (JSON)",
-                    data=json_str,
+                    data=json_str_all,
                     file_name=f"global_backup_{today.isoformat()}.json",
                     mime="application/json",
                     use_container_width=True
@@ -778,11 +804,18 @@ def main():
             selected_ids = []
             for cat, items in cats.items():
                 st.markdown(f"**{html.escape(cat)}**")
-                cols = st.columns(2)
-                for i, t in enumerate(items):
-                    with cols[i % 2]:
+                if is_mobile_mode:
+                    # 手机端单列布局
+                    for t in items:
                         if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{today}_{view_as}_{t['id']}", disabled=already_done):
                             if not already_done: selected_ids.append(t["id"])
+                else:
+                    # 电脑端双列布局
+                    cols = st.columns(2)
+                    for i, t in enumerate(items):
+                        with cols[i % 2]:
+                            if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{today}_{view_as}_{t['id']}", disabled=already_done):
+                                if not already_done: selected_ids.append(t["id"])
                             
             st.divider(); c1, c2, c3 = st.columns(3)
             if already_done:
@@ -824,10 +857,46 @@ def main():
     with tab_objs[2]:
         st.subheader("历史与图表分析")
         
+        # 补签卡功能
+        makeup_cards = user_row.get("makeup_cards") or 0
+        if makeup_cards > 0:
+            st.markdown(f"🎫 **你有 {makeup_cards} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
+            # 找出最近 7 天没有记录的日期
+            missing_dates = []
+            for i in range(1, 8):
+                past_date = today - timedelta(days=i)
+                rec = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (past_date.isoformat(), view_as)).fetchone()
+                if not rec:
+                    missing_dates.append(past_date)
+            
+            if missing_dates:
+                with st.form("makeup_form"):
+                    sel_date = st.selectbox("选择要补签的日期", missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({WEEKDAY_CN[x.weekday()]})")
+                    st.caption("补签将使用当天的满分标准为您记录。")
+                    if st.form_submit_button("使用 1 张补签卡", type="primary"):
+                        # 获取那天设定的阈值
+                        t_thr = get_thresholds(db, view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
+                        db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (current_user,))
+                        # 直接按满分补全
+                        db.execute("""
+                            INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) 
+                            VALUES (?, ?, '["补签"]', ?, 0, '{}', ?, ?, ?, ?)
+                        """, (sel_date.isoformat(), view_as, t_thr["full"], t_thr["full"], bj_now().isoformat(), t_thr["basic"], t_thr["full"]))
+                        db.commit()
+                        recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as)
+                        st.success("补签成功！")
+                        st.rerun()
+            else:
+                st.info("最近 7 天都全勤了，太棒了，无需补签！")
+        else:
+            st.info("💡 提示：商城有售“补签卡”，可用于补全漏掉的打卡。")
+            
+        st.divider()
+        
         time_view = st.radio("选择时间维度查看走势", ["按日查看", "按周查看", "按月查看"], horizontal=True)
         
         all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
-        if all_recs:
+        if all_recs and not is_mobile_mode: # 手机模式隐藏图表
             df = pd.DataFrame([{"日期": r["day"], "总分": r["total_score"]} for r in all_recs])
             df["日期"] = pd.to_datetime(df["日期"])
             
@@ -857,6 +926,8 @@ def main():
                 tooltip=[alt.Tooltip('日期:T', format='%Y-%m-%d'), '总分:Q']
             )
             st.altair_chart(bar_chart, use_container_width=True)
+        elif is_mobile_mode:
+            st.caption("手机精简模式下已隐藏图表。")
         else:
             st.info("暂无打卡数据，快去打卡吧！")
             
@@ -883,8 +954,13 @@ def main():
                 c1, c2, c3 = st.columns([5, 2, 2])
                 c1.write(f"**{html.escape(name)}**"); c2.write(f"`{cost} 分`")
                 if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost)):
-                    db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
-                    db.commit(); st.success("兑换成功！"); st.rerun()
+                    if name == "补签卡":
+                        db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
+                        db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
+                        db.commit(); st.success("兑换成功！获得 1 张补签卡。"); st.rerun()
+                    else:
+                        db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
+                        db.commit(); st.success("兑换成功！"); st.rerun()
 
     with tab_objs[4]:
         st.subheader("兑换历史")
