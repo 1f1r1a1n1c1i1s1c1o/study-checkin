@@ -87,7 +87,7 @@ GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 # ================= 数据库封装 =================
 class SqliteCursor:
-    """把 sqlite3.Cursor 的 fetchone/fetchall 结果统一转成 dict。"""
+    """sqlite3 结果统一转 dict，与云端 RealDictCursor 行为一致。"""
     def __init__(self, cur):
         self._cur = cur
     @property
@@ -153,7 +153,7 @@ def get_db():
 
 def init_db(db):
     tables = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0)",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
         "CREATE TABLE IF NOT EXISTS period_bonus (period_key TEXT, owner_id TEXT, kind TEXT, points REAL, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS redemptions (id SERIAL PRIMARY KEY, owner_id TEXT, item TEXT, cost REAL, ts TEXT)",
@@ -182,6 +182,7 @@ def init_db(db):
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS webhook_url TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS makeup_cards INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone_offset REAL DEFAULT 8.0",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS host_id TEXT",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS basic_thr REAL",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS full_thr REAL",
@@ -209,6 +210,7 @@ def init_db(db):
             "ALTER TABLE users ADD COLUMN webhook_url TEXT",
             "ALTER TABLE users ADD COLUMN makeup_cards INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN timezone_offset REAL DEFAULT 8.0",
+            "ALTER TABLE users ADD COLUMN host_id TEXT",
             "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE daily_records ADD COLUMN basic_thr REAL",
             "ALTER TABLE daily_records ADD COLUMN full_thr REAL",
@@ -292,6 +294,20 @@ def init_old_admin_data(db, owner_id):
 
 def get_all_users(db):
     return [{"username": r["username"], "role": r["role"]} for r in db.execute("SELECT username, role FROM users").fetchall()]
+
+
+# ================= 三级权限：可见用户 =================
+def get_visible_users(db, current_user, current_role):
+    """admin: 全部；host: 自己 + host_id=自己的；user: 自己。"""
+    if current_role == "admin":
+        return [u["username"] for u in get_all_users(db)]
+    if current_role == "host":
+        rows = db.execute(
+            "SELECT username FROM users WHERE username=? OR host_id=?",
+            (current_user, current_user)
+        ).fetchall()
+        return [r["username"] for r in rows]
+    return [current_user]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -757,6 +773,12 @@ def main():
     except RuntimeError as e:
         st.error(str(e)); st.stop()
 
+    # 【三级权限】安全读取 host_id（本地 sqlite3.Row 需先 dict 化再 .get）
+    try:
+        user_host_id = dict(user_row).get("host_id")
+    except Exception:
+        user_host_id = None
+
     if st.session_state.get("force_pwd_change"):
         st.title("⚠️ 安全提示：请修改默认密码")
         st.warning("检测到您正在使用系统默认密码 (123456)，为了您的数据安全，请立即修改后才能继续使用。")
@@ -793,7 +815,6 @@ def main():
         all_users_data = get_all_users(db)
     except Exception:
         all_users_data = []
-    user_names = [u["username"] for u in all_users_data]
 
     user_tz = user_row.get("timezone_offset")
     if user_tz is None:
@@ -816,13 +837,30 @@ def main():
         st.title("学习打卡")
         is_mobile_mode = st.checkbox("📱 手机精简模式", value=False)
 
-        if current_role == "admin":
-            view_as = st.selectbox("管理员特权：切换账号", user_names, index=user_names.index(current_user) if current_user in user_names else 0)
+        # 【三级权限】view_as 逻辑：先取可见集合，再按角色决定是否出现 selectbox，最后兜底校验
+        try:
+            visible_users = get_visible_users(db, current_user, current_role)
+        except Exception:
+            visible_users = [current_user]
+        if current_user not in visible_users:
+            visible_users = [current_user] + visible_users
+
+        if current_role == "user":
+            view_as = current_user
+        elif current_role in ("admin", "host"):
+            idx = visible_users.index(current_user) if current_user in visible_users else 0
+            label = "管理员特权：切换账号" if current_role == "admin" else "切换配置对象"
+            view_as = st.selectbox(label, visible_users, index=idx)
         else:
             view_as = current_user
 
+        # 兜底校验：任何情况下都不允许越权访问
+        if view_as not in visible_users:
+            view_as = current_user
+
         makeup_cards = user_row.get("makeup_cards") or 0
-        st.info(f"当前身份：{html.escape(view_as)} ({current_role})\n\n当地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{makeup_cards} 张")
+        role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
+        st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{makeup_cards} 张")
         try:
             bal = get_balance(view_as)
         except Exception:
@@ -890,6 +928,8 @@ def main():
                                 else:
                                     for tbl in ["daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
                                         db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
+                                    # 【三级权限】改名级联：把绑定我为 host 的 user.host_id 一起改
+                                    db.execute("UPDATE users SET host_id=? WHERE host_id=?", (new_name, current_user))
                                     db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
                                     db.commit(); st.session_state.user = new_name; st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
                             except RuntimeError as e:
@@ -938,10 +978,15 @@ def main():
             del st.session_state.role
             st.rerun()
 
+    # 【三级权限】tabs 过滤：仅 admin / host 可见系统设置
+    base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
+    base_mobile = ["打卡", "商城", "兑换"]
+    can_config = current_role in ("admin", "host")
+
     if is_mobile_mode:
-        tabs = ["打卡", "商城", "兑换"] + (["系统设置"] if current_role == "admin" else [])
+        tabs = base_mobile + (["系统设置"] if can_config else [])
     else:
-        tabs = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件", "系统设置"]
+        tabs = base_desktop + (["系统设置"] if can_config else [])
 
     tab_objs = st.tabs(tabs)
     tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
@@ -1101,7 +1146,6 @@ def main():
                 else:
                     st.info("最近 7 天全勤！")
             else:
-                # 注意：这里使用英文单引号外层 + 「」内层，杜绝中文引号被编辑器自动转成英文引号的坑
                 st.info('💡 提示：商城有售「补签卡」。')
 
             st.divider()
@@ -1292,15 +1336,18 @@ def main():
                         st.session_state["confirm_roll"] = True
                         st.rerun()
 
-    # ============ 系统设置 ============
+    # ============ 系统设置（仅 admin / host 可见） ============
     if "系统设置" in tab_dict:
         with tab_dict["系统设置"]:
             st.subheader("系统设置")
             if current_role == "admin":
                 st.info(f"当前正在配置：**{html.escape(view_as)}**")
+            elif current_role == "host":
+                st.info(f"当前正在配置：**{html.escape(view_as)}**")
             else:
                 st.info("当前正在配置你的专属设置。")
 
+            # ---- 1. 修改每日任务（admin + host） ----
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
             try:
@@ -1330,6 +1377,7 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
+            # ---- 2. 修改商城奖励 ----
             st.divider()
             st.markdown("### 2. 修改商城奖励")
             try:
@@ -1356,6 +1404,7 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
+            # ---- 3. 修改考试科目 ----
             st.divider()
             st.markdown("### 3. 修改考试科目")
             try:
@@ -1412,6 +1461,7 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
+            # ---- 4. 修改多科达成奖励 ----
             st.divider()
             st.markdown("### 4. 修改多科达成奖励")
             try:
@@ -1440,6 +1490,7 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
+            # ---- 5. 修改阈值与 Bonus 规则 ----
             st.divider()
             st.markdown("### 5. 修改阈值与 Bonus 规则（阈值仅影响新打卡，Bonus 会按新规则重算历史）")
             try:
@@ -1504,11 +1555,10 @@ def main():
                     except RuntimeError as e:
                         st.error(str(e))
 
+            # ---- 6. 全局徽章配置（仅 admin 可操作，host 看到提示） ----
             st.divider()
-            st.markdown("### 6. 全局徽章配置与 AI 生成 (仅管理员可操作)")
-            if current_role != "admin":
-                st.info("全局徽章由管理员统一配置。")
-            else:
+            st.markdown("### 6. 全局徽章配置与 AI 生成")
+            if current_role == "admin":
                 with st.form("add_badge_form"):
                     c1, c2, c3 = st.columns([3, 2, 2])
                     b_name = c1.text_input("徽章名称")
@@ -1548,48 +1598,127 @@ def main():
                                 db.commit(); st.cache_data.clear(); st.rerun()
                             except RuntimeError as e:
                                 st.error(str(e))
+            else:
+                st.info("全局徽章由管理员配置。")
 
+            # ---- 7. 用户管理与权限控制（仅 admin） ----
             if current_role == "admin":
                 st.divider()
                 st.markdown("### 7. 用户管理与权限控制")
+
+                all_tbls = ["users", "daily_records", "period_bonus", "redemptions", "exam_rewards",
+                            "special_events", "extra_points", "config_tasks", "config_shop",
+                            "config_exam", "config_exam_rules", "config_thresholds",
+                            "config_bonus_rules", "config_exam_multihit"]
+
                 for u in all_users_data:
                     uname = u["username"]; urole = u["role"]
-                    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
-                    c1.write(f"用户：**{html.escape(uname)}**")
-                    if urole == "admin":
-                        c2.success("🟢 管理员")
-                        if uname != current_user:
-                            if c3.button("降级为普通用户", key=f"demote_{uname}"):
-                                try:
-                                    db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
-                                    db.commit(); st.rerun()
-                                except RuntimeError as e:
-                                    st.error(str(e))
-                    else:
-                        c2.info("⚪ 普通用户")
-                        if c3.button("提升为管理员", key=f"promote_{uname}"):
+                    try:
+                        host_row = db.execute("SELECT host_id FROM users WHERE username=?", (uname,)).fetchone()
+                        uhost = dict(host_row).get("host_id") if host_row else None
+                    except Exception:
+                        uhost = None
+
+                    is_self = (uname == current_user)
+                    role_badge = {"admin": "🟢 管理员", "host": "🟡 Host", "user": "⚪ 普通用户"}.get(urole, urole)
+
+                    i1, i2, i3 = st.columns([3, 2, 3])
+                    i1.write(f"👤 **{html.escape(uname)}**" + (" (你自己)" if is_self else ""))
+                    i2.write(role_badge)
+                    i3.write(f"↳ Host: **{html.escape(uhost)}**" if uhost else "↳ Host: —")
+
+                    if not is_self:
+                        rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+                        if rc1.button("→ 管理员", key=f"set_admin_{uname}", disabled=(urole == "admin")):
                             try:
                                 db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
                                 db.commit(); st.rerun()
-                            except RuntimeError as e:
-                                st.error(str(e))
-
-                    if c4.button("重置密码", key=f"reset_{uname}"):
-                        try:
-                            db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname))
-                            db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
-                        except RuntimeError as e:
-                            st.error(str(e))
-
-                    if uname != current_user:
-                        if c5.button("删除账号", key=f"del_{uname}"):
+                            except RuntimeError as e: st.error(str(e))
+                        if rc2.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host")):
                             try:
-                                for tbl in ["users", "daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
-                                    col = "username" if tbl == "users" else "owner_id"
-                                    db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
-                                db.commit(); st.success(f"用户 {uname} 已彻底删除"); st.rerun()
-                            except RuntimeError as e:
-                                st.error(str(e))
+                                db.execute("UPDATE users SET role='host' WHERE username=?", (uname,))
+                                db.commit(); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
+                        if rc3.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user")):
+                            try:
+                                db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
+                                db.commit(); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
+                        if rc4.button("重置密码", key=f"reset_{uname}"):
+                            try:
+                                db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname))
+                                db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
+                            except RuntimeError as e: st.error(str(e))
+                        if rc5.button("删除", key=f"del_{uname}"):
+                            st.session_state[f"pending_del_{uname}"] = True
+                            st.rerun()
+
+                        bc1, bc2, bc3 = st.columns([3, 1, 1])
+                        bind_val = bc1.text_input("绑定到 host", value=uhost or "", key=f"bind_val_{uname}", label_visibility="collapsed", placeholder="输入 host 用户名")
+                        if bc2.button("保存绑定", key=f"save_bind_{uname}"):
+                            target = (bind_val or "").strip()
+                            if not target:
+                                st.error("Host 用户名不能为空")
+                            elif target == uname:
+                                st.error("不能绑定到自己")
+                            else:
+                                try:
+                                    t_row = db.execute("SELECT role FROM users WHERE username=?", (target,)).fetchone()
+                                    if not t_row:
+                                        st.error(f"目标 {target} 不存在")
+                                    elif t_row["role"] not in ("host", "admin"):
+                                        st.error(f"目标 {target} 不是 host/admin")
+                                    else:
+                                        # 环检测：target 的 host 链不能出现 uname
+                                        visited = {uname}; cur = target; cyclic = False
+                                        while cur:
+                                            if cur in visited:
+                                                cyclic = True; break
+                                            visited.add(cur)
+                                            c_row = db.execute("SELECT host_id FROM users WHERE username=?", (cur,)).fetchone()
+                                            cur = dict(c_row).get("host_id") if c_row else None
+                                        if cyclic:
+                                            st.error("检测到循环绑定，操作被拒绝")
+                                        else:
+                                            db.execute("UPDATE users SET host_id=? WHERE username=?", (target, uname))
+                                            db.commit(); st.success(f"{uname} 已绑定到 {target}"); st.rerun()
+                                except RuntimeError as e: st.error(str(e))
+                        if bc3.button("解绑", key=f"unbind_{uname}", disabled=(not uhost)):
+                            try:
+                                db.execute("UPDATE users SET host_id=NULL WHERE username=?", (uname,))
+                                db.commit(); st.success(f"{uname} 已解绑"); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
+
+                        # 删除确认（host 需先解绑其名下 user）
+                        pending_key = f"pending_del_{uname}"
+                        if st.session_state.get(pending_key):
+                            st.warning(f"确认删除用户 **{html.escape(uname)}**？此操作不可撤销。")
+                            if urole == "host":
+                                try:
+                                    bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                                except Exception:
+                                    bound_count = 0
+                                if bound_count > 0:
+                                    st.warning(f"该 host 下有 {bound_count} 个 user，删除后将解绑（user 数据保留）。")
+                            cc1, cc2 = st.columns(2)
+                            if cc1.button(f"确认删除 {uname}", key=f"confirm_del_{uname}", type="primary"):
+                                try:
+                                    # 先解绑 host 名下的 user
+                                    db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
+                                    # 再删除该用户的所有数据
+                                    for tbl in all_tbls:
+                                        col = "username" if tbl == "users" else "owner_id"
+                                        db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
+                                    db.commit()
+                                    st.session_state.pop(pending_key, None)
+                                    st.success(f"用户 {uname} 已彻底删除")
+                                    st.rerun()
+                                except RuntimeError as e: st.error(str(e))
+                            if cc2.button("取消删除", key=f"cancel_del_{uname}"):
+                                st.session_state.pop(pending_key, None)
+                                st.rerun()
+
+                    st.divider()
 
 
 if __name__ == "__main__":
