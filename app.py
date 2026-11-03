@@ -17,8 +17,7 @@ else:
 
 # ================= 兼容性封装 =================
 def _submit(label, **kwargs):
-    """form_submit_button 兼容封装：优先使用新版 width='stretch'，
-    若当前 Streamlit 版本尚不支持 width 参数则回退到 use_container_width=True。"""
+    """form_submit_button 兼容封装：新版走 width='stretch'，旧版回退 use_container_width。"""
     try:
         return st.form_submit_button(label, width="stretch", **kwargs)
     except TypeError:
@@ -27,15 +26,12 @@ def _submit(label, **kwargs):
 
 # ================= 密码与安全区 =================
 def hash_pwd_sha256(pwd: str) -> str:
-    """旧版 SHA256，用于兼容老数据"""
     return hashlib.sha256(pwd.encode()).hexdigest()
 
 def hash_pwd_bcrypt(pwd: str) -> str:
-    """新版 bcrypt 强哈希"""
     return bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 def check_pwd_bcrypt(pwd: str, hashed: str) -> bool:
-    """校验 bcrypt 哈希"""
     try:
         return bcrypt.checkpw(pwd.encode('utf-8'), hashed.encode('utf-8'))
     except ValueError:
@@ -56,7 +52,6 @@ TIMEZONES = {
 
 
 def get_user_now(offset_hours: float) -> datetime:
-    """带边界保护的时区转换：非法值兜底为 UTC+8"""
     try:
         oh = float(offset_hours)
     except (TypeError, ValueError):
@@ -92,8 +87,7 @@ GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 # ================= 数据库封装 =================
 class SqliteCursor:
-    """把 sqlite3.Cursor 的 fetchone/fetchall 结果统一转成 dict，
-    与云端 RealDictCursor 行为一致 —— 彻底解决 sqlite3.Row 没有 .get() 的 bug。"""
+    """把 sqlite3.Cursor 的 fetchone/fetchall 结果统一转成 dict。"""
     def __init__(self, cur):
         self._cur = cur
     @property
@@ -158,7 +152,6 @@ def get_db():
 
 
 def init_db(db):
-    # ========== 顺序修正：先 CREATE TABLE，再 ALTER 补列 ==========
     tables = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
@@ -181,7 +174,6 @@ def init_db(db):
         except: pass
     db.commit()
 
-    # 再为旧表补列（对全新部署来说是 no-op，对新列自动生效）
     if db.is_cloud:
         for q in [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT",
@@ -643,7 +635,6 @@ def render_timer():
     """
     encoded = base64.b64encode(timer_html.encode('utf-8')).decode('ascii')
     data_uri = f"data:text/html;charset=utf-8;base64,{encoded}"
-    # 优先使用 st.iframe（新版 API），若不存在则回退到 components.html
     try:
         st.iframe(data_uri, height=220)
     except AttributeError:
@@ -725,7 +716,7 @@ def login_page(db):
             try:
                 user = db.execute("SELECT * FROM users WHERE username=?", (u_reset,)).fetchone()
                 if user:
-                    sq = user.get("security_question") if hasattr(user, "get") else user["security_question"] if "security_question" in user else None
+                    sq = user.get("security_question")
                     if not sq:
                         st.warning("该账户未设置密保问题，请联系管理员重置密码。")
                     else:
@@ -979,7 +970,6 @@ def main():
                 existing = None
 
             already_done = existing is not None
-            # 【修复】安全解析 done_tasks，兼容 NULL
             done_ids = set(json.loads(existing["done_tasks"])) if (existing and existing["done_tasks"]) else set()
 
             cats = {}
@@ -1111,7 +1101,8 @@ def main():
                 else:
                     st.info("最近 7 天全勤！")
             else:
-                st.info("💡 提示：商城有售"补签卡"。
+                # 注意：这里使用英文单引号外层 + 「」内层，杜绝中文引号被编辑器自动转成英文引号的坑
+                st.info('💡 提示：商城有售「补签卡」。')
 
             st.divider()
             time_view = st.radio("时间维度", ["按日查看", "按周查看", "按月查看"], horizontal=True)
@@ -1161,7 +1152,6 @@ def main():
                 try:
                     row = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (sel, view_as)).fetchone()
                     st.write(f"**总分: {row['total_score']:.1f}** (基础 {row['base_score']:.1f} + Bonus {row['bonus_score']:.1f})")
-                    # 【修复】安全解析 done_tasks
                     done = json.loads(row["done_tasks"]) if row["done_tasks"] else []
                     st.write("完成项：", ", ".join([html.escape(t["name"]) for t in get_tasks(date.fromisoformat(sel).weekday(), view_as) if t["id"] in done]) or "无")
                 except Exception: pass
@@ -1309,7 +1299,7 @@ def main():
             if current_role == "admin":
                 st.info(f"当前正在配置：**{html.escape(view_as)}**")
             else:
-                st.info(f"当前正在配置你的专属设置。")
+                st.info("当前正在配置你的专属设置。")
 
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
