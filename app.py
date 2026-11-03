@@ -19,7 +19,16 @@ DB_PATH = Path(__file__).resolve().parent / "study_points.db"
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 # ================= 默认初始配置 =================
-DEFAULT_BONUS_RULES = {"weekday": {"single": {"points": 1.0, "full_points": 2.0}, "streak2": {"points": 1.5, "full_points": 3.0}, "streak4": {"points": 2.5, "full_points": 5.0}}, "weekend": {"single": {"points": 1.0, "full_points": 2.0}}, "longterm": {"week_basic": 3.5, "week_full": 7.0, "month_basic": 8.0, "month_full": 20.0}}
+DEFAULT_BONUS_RULES = {
+    "weekday": {"single": {"points": 1.0, "full_points": 2.0}, "streak2": {"points": 1.5, "full_points": 3.0}, "streak4": {"points": 2.5, "full_points": 5.0}}, 
+    "weekend": {"single": {"points": 1.0, "full_points": 2.0}}, 
+    "longterm": {
+        "week_basic": 3.5, "week_full": 7.0, 
+        "week_flex_perfect_deduct": 1.0,  # 弹性完美周扣减分
+        "week_flex_basic_deduct": 0.5,    # 弹性达标周扣减分
+        "month_basic": 8.0, "month_full": 20.0
+    }
+}
 DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_points": 1.0, "rank_step_percent": 5.0, "rank_step_points": 1.5}
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
 
@@ -166,7 +175,12 @@ def get_thresholds(db, oid):
     return {r["weekday"]: {"basic": r["basic"], "full": r["full"]} for r in rows}
 def get_bonus_rules(db, oid):
     row = db.execute("SELECT rules_json FROM config_bonus_rules WHERE owner_id=?", (oid,)).fetchone()
-    return json.loads(row["rules_json"]) if row else DEFAULT_BONUS_RULES
+    if not row: return DEFAULT_BONUS_RULES
+    rules = json.loads(row["rules_json"])
+    # 兼容老数据，填补新增的配置字段
+    if "week_flex_perfect_deduct" not in rules["longterm"]: rules["longterm"]["week_flex_perfect_deduct"] = 1.0
+    if "week_flex_basic_deduct" not in rules["longterm"]: rules["longterm"]["week_flex_basic_deduct"] = 0.5
+    return rules
 def get_tasks(db, weekday, oid):
     rows = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=?", (weekday, oid)).fetchall()
     return [{"id": r["id"], "category": r["category"], "name": r["name"], "points": r["points"]} for r in rows]
@@ -218,30 +232,69 @@ def recalc_all_bonus(db, oid):
 
 def settle_longterm_bonus(db, oid):
     bonus_rules = get_bonus_rules(db, oid)
+    lt_rules = bonus_rules["longterm"]
+    
     rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
     scores = {r["day"]: r for r in rows}
     db.execute("DELETE FROM period_bonus WHERE owner_id=?", (oid,))
     if not scores: 
         db.commit(); return
+
+    # 1. 先计算所有完整周的达标/满分情况，缓存起来
     weeks = {}
     for ds in scores:
         d = date.fromisoformat(ds); y, w, _ = d.isocalendar()
         weeks.setdefault(f"{y}-W{w:02d}", []).append(d)
+        
+    week_status = {} # 存储每一周的状态字典: {'is_perfect': bool, 'is_basic': bool}
+    
     for wk, dlist in weeks.items():
         monday = min(dlist) - timedelta(days=min(dlist).weekday())
         full_week = [monday + timedelta(days=i) for i in range(7)]
-        if not all(x.isoformat() in scores for x in full_week): continue
-        basic_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("basic_thr") or 999) for x in full_week)
-        full_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("full_thr") or 999) for x in full_week)
+        if not all(x.isoformat() in scores for x in full_week): 
+            week_status[wk] = {'is_perfect': False, 'is_basic': False}
+            continue
+            
+        miss_basic = 0
+        miss_full = 0
+        for x in full_week:
+            day_data = scores[x.isoformat()]
+            if day_data["base_score"] < (day_data.get("basic_thr") or 999): miss_basic += 1
+            elif day_data["base_score"] < (day_data.get("full_thr") or 999): miss_full += 1
+            
         target_kind, target_pts = None, 0.0
-        if full_ok: target_kind = "完美一周"; target_pts = bonus_rules["longterm"]["week_full"]
-        elif basic_ok: target_kind = "整周达标"; target_pts = bonus_rules["longterm"]["week_basic"]
+        is_perfect = False
+        is_basic = False
+
+        if miss_basic == 0:
+            is_basic = True
+            if miss_full == 0:
+                is_perfect = True
+                target_kind = "完美一周(全满分)"
+                target_pts = lt_rules["week_full"]
+            elif miss_full == 1:
+                is_perfect = True
+                target_kind = "完美一周(弹性1天)"
+                target_pts = max(0, lt_rules["week_full"] - lt_rules.get("week_flex_perfect_deduct", 1.0))
+            else:
+                target_kind = "整周达标"
+                target_pts = lt_rules["week_basic"]
+        elif miss_basic == 1:
+            is_basic = True
+            target_kind = "整周达标(弹性1天)"
+            target_pts = max(0, lt_rules["week_basic"] - lt_rules.get("week_flex_basic_deduct", 0.5))
+            
+        week_status[wk] = {'is_perfect': is_perfect, 'is_basic': is_basic}
+        
         if target_kind:
             db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"W:{wk}", oid, target_kind, target_pts, bj_now().isoformat()))
+
+    # 2. 再进行月结算（带周豁免逻辑）
     months = {}
     for ds in scores:
         d = date.fromisoformat(ds); y, m = d.year, d.month
         months.setdefault(f"{y}-{m:02d}", []).append(d)
+        
     for mk, dlist in months.items():
         y, m = int(mk.split("-")[0]), int(mk.split("-")[1])
         first = date(y, m, 1)
@@ -251,12 +304,32 @@ def settle_longterm_bonus(db, oid):
         while cur < nxt:
             alldays.append(cur)
             cur += timedelta(days=1)
+            
+        # 月内不全有记录，不算月奖
         if not all(x.isoformat() in scores for x in alldays): continue
-        basic_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("basic_thr") or 999) for x in alldays)
-        full_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("full_thr") or 999) for x in alldays)
+        
+        month_is_perfect = True
+        month_is_basic = True
+        
+        for day_obj in alldays:
+            ds = day_obj.isoformat()
+            day_data = scores[ds]
+            dy, dw, _ = day_obj.isocalendar()
+            wk_key = f"{dy}-W{dw:02d}"
+            w_stat = week_status.get(wk_key, {'is_perfect': False, 'is_basic': False})
+            
+            day_full = day_data["base_score"] >= (day_data.get("full_thr") or 999)
+            day_basic = day_data["base_score"] >= (day_data.get("basic_thr") or 999)
+            
+            # 如果这天没满分，但它所在的周是完美周（意味着已豁免），月完美判定依然通过
+            if not day_full and not w_stat['is_perfect']: month_is_perfect = False
+            # 如果这天没达标，但它所在的周是达标周（意味着已豁免），月达标判定依然通过
+            if not day_basic and not w_stat['is_basic']: month_is_basic = False
+
         target_kind, target_pts = None, 0.0
-        if full_ok: target_kind = "完美一月"; target_pts = bonus_rules["longterm"]["month_full"]
-        elif basic_ok: target_kind = "整月达标"; target_pts = bonus_rules["longterm"]["month_basic"]
+        if month_is_perfect: target_kind = "完美一月"; target_pts = lt_rules["month_full"]
+        elif month_is_basic: target_kind = "整月达标"; target_pts = lt_rules["month_basic"]
+            
         if target_kind:
             db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"M:{mk}", oid, target_kind, target_pts, bj_now().isoformat()))
     db.commit()
@@ -597,7 +670,6 @@ def main():
         st.markdown("### 3. 修改考试科目 (若为空白可在此添加)")
         exam_config, exam_rules = get_exam_config(db, view_as)
         
-        # 构造 DataFrame，目标统一转为字符串处理
         df_exam_data = []
         for k, v in exam_config.items():
             df_exam_data.append({
@@ -653,7 +725,7 @@ def main():
                     db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
             
             if has_error:
-                db.commit() # 依然提交（可能部分成功），但提示错误
+                db.commit()
             else:
                 db.commit(); st.success("科目已更新！"); st.rerun()
 
@@ -695,12 +767,26 @@ def main():
                 lt_wf = st.number_input("完美一周", value=float(bonus_rules["longterm"]["week_full"]), step=0.5, key=f"b10_{view_as}")
                 lt_mb = st.number_input("整月达标", value=float(bonus_rules["longterm"]["month_basic"]), step=0.5, key=f"b11_{view_as}")
                 lt_mf = st.number_input("完美一月", value=float(bonus_rules["longterm"]["month_full"]), step=0.5, key=f"b12_{view_as}")
+                
+                st.markdown("**弹性容错扣减分**")
+                flex_p = st.number_input("弹性完美扣减 (少1天满分)", value=float(bonus_rules["longterm"].get("week_flex_perfect_deduct", 1.0)), step=0.5, key=f"b13_{view_as}")
+                flex_b = st.number_input("弹性达标扣减 (少1天达标)", value=float(bonus_rules["longterm"].get("week_flex_basic_deduct", 0.5)), step=0.5, key=f"b14_{view_as}")
 
             if st.form_submit_button("保存新规则 (即刻生效)", type="primary", use_container_width=True):
                 for i in range(7): 
                     db.execute("DELETE FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as))
                     db.execute("INSERT INTO config_thresholds (weekday, owner_id, basic, \"full\") VALUES (?,?,?,?)", (i, view_as, t_inputs[i]["basic"], t_inputs[i]["full"]))
-                new_bonus = {"weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}}, "weekend": {"single": {"points": we_single, "full_points": we_single_full}}, "longterm": {"week_basic": lt_wb, "week_full": lt_wf, "month_basic": lt_mb, "month_full": lt_mf}}
+                
+                new_bonus = {
+                    "weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}}, 
+                    "weekend": {"single": {"points": we_single, "full_points": we_single_full}}, 
+                    "longterm": {
+                        "week_basic": lt_wb, "week_full": lt_wf, 
+                        "month_basic": lt_mb, "month_full": lt_mf,
+                        "week_flex_perfect_deduct": flex_p,
+                        "week_flex_basic_deduct": flex_b
+                    }
+                }
                 db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
                 db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
                 db.commit(); 
