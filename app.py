@@ -47,7 +47,6 @@ class DBWrapper:
     def execute(self, query, params=()):
         if self.is_cloud:
             query = query.replace("?", "%s")
-            # 修复并发问题：每次执行时动态获取游标
             cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             if params: cur.execute(query, params)
             else: cur.execute(query)
@@ -374,7 +373,6 @@ def get_balance(db, oid) -> dict:
     spent = db.execute("SELECT COALESCE(SUM(cost),0) as s FROM redemptions WHERE owner_id=?", (oid,)).fetchone()["s"]
     extra = db.execute("SELECT COALESCE(SUM(points),0) as s FROM extra_points WHERE owner_id=?", (oid,)).fetchone()["s"]
     
-    # 浮点数精度保护
     return {
         "daily": round(float(daily), 2), "period": round(float(period), 2), 
         "exam": round(float(exam), 2), "special": round(float(special), 2), 
@@ -625,8 +623,6 @@ def login_page(db):
 def main():
     st.set_page_config(page_title="学习打卡系统", layout="centered", initial_sidebar_state="collapsed")
     db = get_db()
-    
-    # 防御午夜跨日问题：每次 rerun 时重新获取时间
     now = bj_now(); today = now.date()
 
     if "user" not in st.session_state:
@@ -752,7 +748,6 @@ def main():
                 c1.metric("基础分", f"{base_now:.1f}"); c2.metric("Bonus", f"{bonus:.1f}"); c3.metric("预计总分", f"{base_now + bonus:.1f}")
                 if detail.get("tier") in TIER_CN: st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
                 if st.button("保存今日打卡", type="primary", use_container_width=True):
-                    # 再次获取当前的 today，防止跨日
                     current_today = bj_now().date()
                     save_day(db, current_today, selected_ids, view_as); st.success("已保存！"); st.rerun()
 
@@ -776,28 +771,45 @@ def main():
 
     with tab_objs[2]:
         st.subheader("历史与图表分析")
+        
+        # 时间维度切换
+        time_view = st.radio("选择时间维度查看走势", ["按日查看", "按周查看", "按月查看"], horizontal=True)
+        
         all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
         if all_recs:
-            df_chart = pd.DataFrame([{"日期": r["day"], "总分": r["total_score"]} for r in all_recs])
-            df_chart["日期"] = pd.to_datetime(df_chart["日期"])
+            df = pd.DataFrame([{"日期": r["day"], "总分": r["total_score"]} for r in all_recs])
+            df["日期"] = pd.to_datetime(df["日期"])
             
-            st.markdown("**每日得分走势**")
-            line_chart = alt.Chart(df_chart).mark_line(point=True).encode(
-                x=alt.X('日期:T', title='日期'),
-                y=alt.Y('总分:Q', title='当日总分'),
-                tooltip=['日期:T', '总分:Q']
+            if time_view == "按日查看":
+                df_grouped = df.copy()
+                x_title = "日期 (每日)"
+            elif time_view == "按周查看":
+                # 按周聚合，W-MON 表示以周一为起始
+                df_grouped = df.set_index("日期").resample('W-MON', label='left', closed='left').sum().reset_index()
+                x_title = "日期 (每周一)"
+            else:
+                # 按月聚合，MS 表示 Month Start
+                df_grouped = df.set_index("日期").resample('MS').sum().reset_index()
+                x_title = "日期 (每月1日)"
+            
+            # 1. 走势折线图
+            st.markdown(f"**{time_view}得分走势**")
+            line_chart = alt.Chart(df_grouped).mark_line(point=True, color='#1f77b4').encode(
+                x=alt.X('日期:T', title=x_title, axis=alt.Axis(labelAngle=0)),  # 强制文字水平
+                y=alt.Y('总分:Q', title='总分', axis=alt.Axis(labelAngle=0)),
+                tooltip=[alt.Tooltip('日期:T', format='%Y-%m-%d'), '总分:Q']
             ).interactive()
             st.altair_chart(line_chart, use_container_width=True)
             
-            st.markdown("**打卡活跃度 (日历图)**")
-            df_chart["星期"] = df_chart["日期"].dt.day_name()
-            heatmap = alt.Chart(df_chart).mark_rect().encode(
-                x=alt.X('yearmonth(日期):O', title='月份'),
-                y=alt.Y('date(日期):O', title='日期'),
-                color=alt.Color('总分:Q', scale=alt.Scale(scheme='greens')),
-                tooltip=['日期:T', '总分:Q']
+            # 2. 柱状图对比
+            st.markdown(f"**{time_view}得分柱状图**")
+            bar_chart = alt.Chart(df_grouped).mark_bar().encode(
+                x=alt.X('日期:T', title=x_title, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y('总分:Q', title='总分', axis=alt.Axis(labelAngle=0)),
+                color=alt.Color('总分:Q', scale=alt.Scale(scheme='greens'), legend=None),
+                tooltip=[alt.Tooltip('日期:T', format='%Y-%m-%d'), '总分:Q']
             )
-            st.altair_chart(heatmap, use_container_width=True)
+            st.altair_chart(bar_chart, use_container_width=True)
         else:
             st.info("暂无打卡数据，快去打卡吧！")
             
