@@ -310,6 +310,17 @@ def get_visible_users(db, current_user, current_role):
     return [current_user]
 
 
+def _remaining_admins(db, exclude_username):
+    """剩余 admin 数量（不含 exclude_username）。用于唯一 admin 保护。"""
+    try:
+        return db.execute(
+            "SELECT COUNT(*) as c FROM users WHERE role='admin' AND username != ?",
+            (exclude_username,)
+        ).fetchone()["c"]
+    except Exception:
+        return 0
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_thresholds(oid):
     db = get_db()
@@ -379,6 +390,18 @@ def get_balance(oid) -> dict:
         "special": round(float(special), 2), "spent": round(float(spent), 2), "extra": round(float(extra), 2),
         "balance": round(float(daily) + float(period) + float(exam) + float(special) + float(extra) - float(spent), 2)
     }
+
+
+def get_makeup_cards_of(username):
+    """读取指定用户的补签卡数量（不存在则 0）。"""
+    try:
+        db = get_db()
+        row = db.execute("SELECT makeup_cards FROM users WHERE username=?", (username,)).fetchone()
+        if not row:
+            return 0
+        return int(dict(row).get("makeup_cards") or 0)
+    except Exception:
+        return 0
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -773,11 +796,11 @@ def main():
     except RuntimeError as e:
         st.error(str(e)); st.stop()
 
-    # 【三级权限】安全读取 host_id（本地 sqlite3.Row 需先 dict 化再 .get）
+    # 需求 9：确保 host_id 字段在本地 sqlite3.Row 下也能安全读取
     try:
-        user_host_id = dict(user_row).get("host_id")
+        _ = dict(user_row).get("host_id")
     except Exception:
-        user_host_id = None
+        _ = None
 
     if st.session_state.get("force_pwd_change"):
         st.title("⚠️ 安全提示：请修改默认密码")
@@ -837,7 +860,6 @@ def main():
         st.title("学习打卡")
         is_mobile_mode = st.checkbox("📱 手机精简模式", value=False)
 
-        # 【三级权限】view_as 逻辑：先取可见集合，再按角色决定是否出现 selectbox，最后兜底校验
         try:
             visible_users = get_visible_users(db, current_user, current_role)
         except Exception:
@@ -854,13 +876,14 @@ def main():
         else:
             view_as = current_user
 
-        # 兜底校验：任何情况下都不允许越权访问
         if view_as not in visible_users:
             view_as = current_user
 
-        makeup_cards = user_row.get("makeup_cards") or 0
+        # 改动 1A：显示 view_as 的补签卡（不是 current_user 的）
+        view_makeup_sidebar = get_makeup_cards_of(view_as)
+
         role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
-        st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{makeup_cards} 张")
+        st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
         try:
             bal = get_balance(view_as)
         except Exception:
@@ -928,7 +951,6 @@ def main():
                                 else:
                                     for tbl in ["daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
                                         db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
-                                    # 【三级权限】改名级联：把绑定我为 host 的 user.host_id 一起改
                                     db.execute("UPDATE users SET host_id=? WHERE host_id=?", (new_name, current_user))
                                     db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
                                     db.commit(); st.session_state.user = new_name; st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
@@ -978,7 +1000,6 @@ def main():
             del st.session_state.role
             st.rerun()
 
-    # 【三级权限】tabs 过滤：仅 admin / host 可见系统设置
     base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
     base_mobile = ["打卡", "商城", "兑换"]
     can_config = current_role in ("admin", "host")
@@ -1109,9 +1130,10 @@ def main():
     if "历史与图表" in tab_dict:
         with tab_dict["历史与图表"]:
             st.subheader("历史与图表分析")
-            makeup_cards = user_row.get("makeup_cards") or 0
-            if makeup_cards > 0:
-                st.markdown(f"🎫 **你有 {makeup_cards} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
+            # 改动 1A：显示 view_as 的补签卡
+            view_makeup_hist = get_makeup_cards_of(view_as)
+            if view_makeup_hist > 0:
+                st.markdown(f"🎫 **当前配置对象有 {view_makeup_hist} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
                 try:
                     missing_dates = [today - timedelta(days=i) for i in range(1, 8)
                                      if not db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", ((today - timedelta(days=i)).isoformat(), view_as)).fetchone()]
@@ -1126,7 +1148,8 @@ def main():
                         selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
                         if _submit("使用 1 张补签卡并提交", type="primary"):
                             try:
-                                cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (current_user,))
+                                # 改动 1A：扣 view_as 的卡
+                                cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (view_as,))
                                 db.commit()
                                 if cur.rowcount > 0:
                                     t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
@@ -1140,7 +1163,7 @@ def main():
                                     settle_longterm_bonus(db, view_as, now.isoformat())
                                     st.cache_data.clear(); st.success("补签成功！"); st.rerun()
                                 else:
-                                    st.error("补签失败，余额不足。")
+                                    st.error("补签失败，当前配置对象余额不足。")
                             except RuntimeError as e:
                                 st.error(str(e))
                 else:
@@ -1228,8 +1251,9 @@ def main():
                         cc1, cc2 = st.columns(2)
                         if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", type="primary"):
                             try:
+                                # 改动 1A：补签卡加到 view_as 上（与积分扣减口径一致）
                                 if name == "补签卡":
-                                    db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
+                                    db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
                                 db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
                                 db.commit()
                                 st.session_state[confirm_key] = False
@@ -1347,7 +1371,7 @@ def main():
             else:
                 st.info("当前正在配置你的专属设置。")
 
-            # ---- 1. 修改每日任务（admin + host） ----
+            # ---- 1. 修改每日任务 ----
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
             try:
@@ -1490,9 +1514,9 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
-            # ---- 5. 修改阈值与 Bonus 规则 ----
+            # ---- 5. 修改阈值与 Bonus 规则（文案修正，不触发重算） ----
             st.divider()
-            st.markdown("### 5. 修改阈值与 Bonus 规则（阈值仅影响新打卡，Bonus 会按新规则重算历史）")
+            st.markdown("### 5. 修改阈值与 Bonus 规则（阈值与 Bonus 规则下次打卡时生效）")
             try:
                 thresholds = get_thresholds(view_as); bonus_rules = get_bonus_rules(view_as)
             except Exception:
@@ -1529,7 +1553,7 @@ def main():
                     flex_p = st.number_input("弹性完美扣减 (少1天满分)", value=float(bonus_rules["longterm"].get("week_flex_perfect_deduct", 1.0)), step=0.5, key=f"b13_{view_as}")
                     flex_b = st.number_input("弹性达标扣减 (少1天达标)", value=float(bonus_rules["longterm"].get("week_flex_basic_deduct", 0.5)), step=0.5, key=f"b14_{view_as}")
 
-                if _submit("保存新规则 (即刻生效)", type="primary"):
+                if _submit("保存新规则 (下次打卡时生效)", type="primary"):
                     try:
                         for i in range(7):
                             db.execute("DELETE FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as))
@@ -1551,7 +1575,7 @@ def main():
                         }
                         db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
                         db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
-                        db.commit(); st.cache_data.clear(); st.success("✅ 新标准已启用！"); st.rerun()
+                        db.commit(); st.cache_data.clear(); st.success("✅ 新规则已保存，下次打卡时生效。"); st.rerun()
                     except RuntimeError as e:
                         st.error(str(e))
 
@@ -1629,26 +1653,43 @@ def main():
 
                     if not is_self:
                         rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+
                         if rc1.button("→ 管理员", key=f"set_admin_{uname}", disabled=(urole == "admin")):
                             try:
                                 db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
                                 db.commit(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
+
                         if rc2.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host")):
                             try:
-                                db.execute("UPDATE users SET role='host' WHERE username=?", (uname,))
-                                db.commit(); st.rerun()
+                                blocked = False
+                                if urole == "admin":
+                                    if _remaining_admins(db, uname) == 0:
+                                        st.error("这是系统里最后一个管理员，不能降级为 Host。请先提升另一个用户为管理员。")
+                                        blocked = True
+                                if not blocked:
+                                    db.execute("UPDATE users SET role='host' WHERE username=?", (uname,))
+                                    db.commit(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
+
                         if rc3.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user")):
                             try:
-                                db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
-                                db.commit(); st.rerun()
+                                blocked = False
+                                if urole == "admin":
+                                    if _remaining_admins(db, uname) == 0:
+                                        st.error("这是系统里最后一个管理员，不能降级为普通用户。请先提升另一个用户为管理员。")
+                                        blocked = True
+                                if not blocked:
+                                    db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
+                                    db.commit(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
+
                         if rc4.button("重置密码", key=f"reset_{uname}"):
                             try:
                                 db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname))
                                 db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
                             except RuntimeError as e: st.error(str(e))
+
                         if rc5.button("删除", key=f"del_{uname}"):
                             st.session_state[f"pending_del_{uname}"] = True
                             st.rerun()
@@ -1669,7 +1710,6 @@ def main():
                                     elif t_row["role"] not in ("host", "admin"):
                                         st.error(f"目标 {target} 不是 host/admin")
                                     else:
-                                        # 环检测：target 的 host 链不能出现 uname
                                         visited = {uname}; cur = target; cyclic = False
                                         while cur:
                                             if cur in visited:
@@ -1689,30 +1729,34 @@ def main():
                                 db.commit(); st.success(f"{uname} 已解绑"); st.rerun()
                             except RuntimeError as e: st.error(str(e))
 
-                        # 删除确认（host 需先解绑其名下 user）
                         pending_key = f"pending_del_{uname}"
                         if st.session_state.get(pending_key):
                             st.warning(f"确认删除用户 **{html.escape(uname)}**？此操作不可撤销。")
-                            if urole == "host":
-                                try:
-                                    bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
-                                except Exception:
-                                    bound_count = 0
-                                if bound_count > 0:
-                                    st.warning(f"该 host 下有 {bound_count} 个 user，删除后将解绑（user 数据保留）。")
+                            # 不区分 role：查该用户名下绑了多少 user
+                            try:
+                                bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                            except Exception:
+                                bound_count = 0
+                            if bound_count > 0:
+                                st.warning(f"该用户名下有 {bound_count} 个 user，删除后将解绑（user 数据保留）。")
+
                             cc1, cc2 = st.columns(2)
                             if cc1.button(f"确认删除 {uname}", key=f"confirm_del_{uname}", type="primary"):
                                 try:
-                                    # 先解绑 host 名下的 user
-                                    db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
-                                    # 再删除该用户的所有数据
-                                    for tbl in all_tbls:
-                                        col = "username" if tbl == "users" else "owner_id"
-                                        db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
-                                    db.commit()
-                                    st.session_state.pop(pending_key, None)
-                                    st.success(f"用户 {uname} 已彻底删除")
-                                    st.rerun()
+                                    blocked = False
+                                    if urole == "admin":
+                                        if _remaining_admins(db, uname) == 0:
+                                            st.error("这是系统里最后一个管理员，不能删除。请先提升另一个用户为管理员。")
+                                            blocked = True
+                                    if not blocked:
+                                        db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
+                                        for tbl in all_tbls:
+                                            col = "username" if tbl == "users" else "owner_id"
+                                            db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
+                                        db.commit()
+                                        st.session_state.pop(pending_key, None)
+                                        st.success(f"用户 {uname} 已彻底删除")
+                                        st.rerun()
                                 except RuntimeError as e: st.error(str(e))
                             if cc2.button("取消删除", key=f"cancel_del_{uname}"):
                                 st.session_state.pop(pending_key, None)
