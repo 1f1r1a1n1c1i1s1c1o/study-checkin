@@ -7,12 +7,29 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import streamlit.components.v1 as components
+import bcrypt
 
 IS_CLOUD = "DATABASE_URL" in st.secrets
 if IS_CLOUD:
     import psycopg2, psycopg2.extras
 else:
     import sqlite3
+
+# ================= 密码与安全区 =================
+def hash_pwd_sha256(pwd: str) -> str:
+    """旧版 SHA256，用于兼容老数据和密保答案"""
+    return hashlib.sha256(pwd.encode()).hexdigest()
+
+def hash_pwd_bcrypt(pwd: str) -> str:
+    """新版 bcrypt 强哈希"""
+    return bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def check_pwd_bcrypt(pwd: str, hashed: str) -> bool:
+    """校验 bcrypt 哈希"""
+    try:
+        return bcrypt.checkpw(pwd.encode('utf-8'), hashed.encode('utf-8'))
+    except ValueError:
+        return False
 
 # ================= 时间引擎 =================
 TIMEZONES = {
@@ -51,8 +68,6 @@ DEFAULT_BONUS_RULES = {
 DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_points": 1.0, "rank_step_percent": 5.0, "rank_step_points": 1.5}
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
 GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
-
-def hash_pwd(pwd: str) -> str: return hashlib.sha256(pwd.encode()).hexdigest()
 
 class DBWrapper:
     def __init__(self, conn, is_cloud):
@@ -183,7 +198,8 @@ def init_db(db):
     try:
         row = db.execute("SELECT * FROM users WHERE username='晴'").fetchone()
         if not row:
-            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'admin', '管理员默认密保', '123456')", ("晴", hash_pwd("123456")))
+            # 默认管理员密码使用新版 bcrypt
+            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'admin', '管理员默认密保', ?)", ("晴", hash_pwd_bcrypt("123456"), hash_pwd_sha256("123456")))
             if not db.execute("SELECT * FROM config_tasks WHERE owner_id='晴'").fetchone():
                 init_old_admin_data(db)
         else:
@@ -501,8 +517,21 @@ def login_page(db):
             if st.form_submit_button("登录", type="primary", use_container_width=True):
                 try:
                     user = db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
-                    if user and user["password_hash"] == hash_pwd(p):
-                        st.session_state.user = u; st.session_state.role = user["role"]; st.rerun()
+                    if user:
+                        stored_hash = user["password_hash"]
+                        # 判断旧版 SHA256 (64位) 还是 新版 bcrypt (60位)
+                        if len(stored_hash) == 64:
+                            if stored_hash == hash_pwd_sha256(p):
+                                # 静默升级为 bcrypt
+                                new_hash = hash_pwd_bcrypt(p)
+                                db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, u))
+                                db.commit()
+                                st.session_state.user = u; st.session_state.role = user["role"]; st.rerun()
+                            else: st.error("用户名或密码错误")
+                        else:
+                            if check_pwd_bcrypt(p, stored_hash):
+                                st.session_state.user = u; st.session_state.role = user["role"]; st.rerun()
+                            else: st.error("用户名或密码错误")
                     else: st.error("用户名或密码错误")
                 except RuntimeError as e: st.error(str(e))
                 
@@ -518,7 +547,8 @@ def login_page(db):
                     try:
                         if db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error("用户名已存在")
                         else:
-                            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'user', ?, ?)", (u, hash_pwd(p), sq, hash_pwd(sa.strip().lower())))
+                            # 注册新用户：密码用 bcrypt，密保答案继续用 SHA256
+                            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'user', ?, ?)", (u, hash_pwd_bcrypt(p), sq, hash_pwd_sha256(sa.strip().lower())))
                             db.commit(); st.success("注册成功！请去登录。")
                     except RuntimeError as e: st.error(str(e))
 
@@ -537,8 +567,10 @@ def login_page(db):
                             ans = st.text_input("密保答案"); new_p = st.text_input("新密码", type="password")
                             if st.form_submit_button("确认重置密码", type="primary"):
                                 if not ans or not new_p: st.error("请填写完整")
-                                elif hash_pwd(ans.strip().lower()) == user["security_answer"]:
-                                    db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_p), u_reset))
+                                # 密保校验依然使用 SHA256
+                                elif hash_pwd_sha256(ans.strip().lower()) == user["security_answer"]:
+                                    # 新密码使用 bcrypt 存储
+                                    db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt(new_p), u_reset))
                                     db.commit(); st.success("密码重置成功！请去登录。")
                                 else: st.error("密保答案错误！")
                 else: st.error("该用户名不存在")
@@ -652,7 +684,9 @@ def main():
                 new_pwd = st.text_input("新密码", type="password", key="new_pwd")
                 if st.button("确认修改密码"):
                     if new_pwd: 
-                        try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_pwd), current_user)); db.commit(); st.success("密码已修改！")
+                        try: 
+                            # 修改密码：升级为 bcrypt
+                            db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt(new_pwd), current_user)); db.commit(); st.success("密码已修改！")
                         except RuntimeError as e: st.error(str(e))
                 
                 st.divider()
@@ -774,8 +808,6 @@ def main():
                             try:
                                 cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (current_user,))
                                 db.commit()
-                                
-                                # 使用 rowcount 杜绝并发白嫖
                                 if cur.rowcount > 0:
                                     t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
                                     db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
@@ -1111,7 +1143,7 @@ def main():
                             except RuntimeError as e: st.error(str(e))
                     
                     if c4.button("重置密码", key=f"reset_{uname}"): 
-                        try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd("123456"), uname)); db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
+                        try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname)); db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
                         except RuntimeError as e: st.error(str(e))
                     
                     if uname != current_user:
