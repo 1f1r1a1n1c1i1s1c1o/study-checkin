@@ -52,6 +52,23 @@ def get_db():
         conn.row_factory = sqlite3.Row; db = DBWrapper(conn, False); init_db(db); return db
 
 def init_db(db):
+    # 【核心修复】直接把安全字段的补列放在最前面，确保绝对执行
+    try:
+        if db.is_cloud:
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT")
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT")
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'")
+        else:
+            try: db.execute("ALTER TABLE users ADD COLUMN security_question TEXT")
+            except: pass
+            try: db.execute("ALTER TABLE users ADD COLUMN security_answer TEXT")
+            except: pass
+            try: db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+            except: pass
+        db.commit()
+    except Exception as e:
+        pass
+
     # 1. 基础建表
     tables = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT)",
@@ -74,12 +91,9 @@ def init_db(db):
         except: pass
     db.commit()
     
-    # 2. 强行补列
+    # 2. 其他老数据兼容补列
     if db.is_cloud:
         alter_queries = [
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS basic_thr REAL",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS full_thr REAL",
@@ -102,9 +116,6 @@ def init_db(db):
         db.commit()
     else:
         alter_queries = [
-            "ALTER TABLE users ADD COLUMN security_question TEXT",
-            "ALTER TABLE users ADD COLUMN security_answer TEXT",
-            "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'",
             "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE daily_records ADD COLUMN basic_thr REAL",
             "ALTER TABLE daily_records ADD COLUMN full_thr REAL",
@@ -674,7 +685,6 @@ def main():
                         db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
                         db.commit(); st.rerun()
                 
-                # 重置密码按钮
                 if c4.button("重置密码", key=f"reset_{uname}"):
                     db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd("123456"), uname))
                     db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
