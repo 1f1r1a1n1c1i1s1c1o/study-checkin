@@ -22,6 +22,8 @@ WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周�
 DEFAULT_BONUS_RULES = {"weekday": {"single": {"points": 1.0, "full_points": 2.0}, "streak2": {"points": 1.5, "full_points": 3.0}, "streak4": {"points": 2.5, "full_points": 5.0}}, "weekend": {"single": {"points": 1.0, "full_points": 2.0}}, "longterm": {"week_basic": 3.5, "week_full": 7.0, "month_basic": 8.0, "month_full": 20.0}}
 DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_points": 1.0, "rank_step_percent": 5.0, "rank_step_points": 1.5}
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
+
+# 11档等级
 GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 def hash_pwd(pwd: str) -> str: return hashlib.sha256(pwd.encode()).hexdigest()
@@ -52,7 +54,6 @@ def get_db():
         conn.row_factory = sqlite3.Row; db = DBWrapper(conn, False); init_db(db); return db
 
 def init_db(db):
-    # 【核心修复】直接把安全字段的补列放在最前面，确保绝对执行
     try:
         if db.is_cloud:
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT")
@@ -66,10 +67,8 @@ def init_db(db):
             try: db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
             except: pass
         db.commit()
-    except Exception as e:
-        pass
+    except Exception: pass
 
-    # 1. 基础建表
     tables = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
@@ -91,7 +90,6 @@ def init_db(db):
         except: pass
     db.commit()
     
-    # 2. 其他老数据兼容补列
     if db.is_cloud:
         alter_queries = [
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
@@ -137,7 +135,6 @@ def init_db(db):
             except: pass
         db.commit()
     
-    # 3. 初始化超级管理员
     try:
         row = db.execute("SELECT * FROM users WHERE username='晴'").fetchone()
         if not row:
@@ -147,8 +144,7 @@ def init_db(db):
         else:
             db.execute("UPDATE users SET role='admin' WHERE username='晴'")
         db.commit()
-    except Exception:
-        pass
+    except Exception: pass
 
 def init_old_admin_data(db):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
@@ -600,17 +596,66 @@ def main():
         st.divider()
         st.markdown("### 3. 修改考试科目 (若为空白可在此添加)")
         exam_config, exam_rules = get_exam_config(db, view_as)
-        df_exam = pd.DataFrame([{"科目": k, "类型": v["type"], "目标": v["target"], "分差": v.get("step", 0), "单档奖励": v["step_points"]} for k, v in exam_config.items()])
-        edited_exam = st.data_editor(df_exam, num_rows="dynamic", use_container_width=True, key=f"edit_exam_{view_as}")
+        
+        # 构造 DataFrame，目标统一转为字符串处理
+        df_exam_data = []
+        for k, v in exam_config.items():
+            df_exam_data.append({
+                "科目": k, 
+                "类型": v["type"], 
+                "目标": str(v["target"]), 
+                "分差": v.get("step", 0), 
+                "单档奖励": v["step_points"]
+            })
+        df_exam = pd.DataFrame(df_exam_data)
+        if df_exam.empty:
+            df_exam = pd.DataFrame(columns=["科目", "类型", "目标", "分差", "单档奖励"])
+
+        edited_exam = st.data_editor(
+            df_exam,
+            column_config={
+                "科目": st.column_config.TextColumn("科目", required=True),
+                "类型": st.column_config.SelectboxColumn("类型", options=["score", "grade"], required=True, help="score=按分数，grade=按等级"),
+                "目标": st.column_config.TextColumn("目标", required=True, help="填数字(如105) 或 等级(如A+)"),
+                "分差": st.column_config.NumberColumn("分差", min_value=0.0, step=1.0, help="仅分数模式有效"),
+                "单档奖励": st.column_config.NumberColumn("单档奖励", min_value=0.0, step=0.5)
+            },
+            num_rows="dynamic", 
+            use_container_width=True, 
+            key=f"edit_exam_{view_as}"
+        )
+        
         if st.button("保存考试科目修改"):
             db.execute("DELETE FROM config_exam WHERE owner_id=?", (view_as,))
+            has_error = False
             for _, row in edited_exam.iterrows():
                 if pd.notna(row["科目"]) and row["科目"]:
                     sub = row["科目"]
-                    if row["类型"] == "score": cfg = {"type": "score", "target": float(row["目标"]), "step": float(row["分差"]), "step_points": float(row["单档奖励"])}
-                    else: cfg = {"type": "grade", "target": row["目标"], "step_points": float(row["单档奖励"])}
+                    e_type = str(row["类型"]).strip().lower()
+                    e_target = str(row["目标"]).strip()
+                    
+                    if e_type not in ["score", "grade"]:
+                        st.error(f"科目 {sub} 的类型必须是 score 或 grade")
+                        has_error = True; break
+                    
+                    if e_type == "score":
+                        try: e_target_val = float(e_target)
+                        except ValueError:
+                            st.error(f"科目 {sub} 选了 score，目标必须是数字")
+                            has_error = True; break
+                        cfg = {"type": "score", "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
+                    else:
+                        if e_target not in GRADES:
+                            st.error(f"科目 {sub} 选了 grade，目标必须在这11档内: {', '.join(GRADES)}")
+                            has_error = True; break
+                        cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
+                        
                     db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
-            db.commit(); st.success("科目已更新！"); st.rerun()
+            
+            if has_error:
+                db.commit() # 依然提交（可能部分成功），但提示错误
+            else:
+                db.commit(); st.success("科目已更新！"); st.rerun()
 
         st.divider()
         st.markdown("### 4. 修改多科达成奖励")
