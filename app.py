@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, random, os, hashlib, urllib.parse, re, html
+import json, random, os, hashlib, urllib.parse, re, html, requests
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import streamlit as st
@@ -20,7 +20,6 @@ def bj_today() -> date: return bj_now().date()
 DB_PATH = Path(__file__).resolve().parent / "study_points.db"
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
-# 内置的 Base64 兜底极简 SVG（防裂图）
 DEFAULT_ICON_BASE64 = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZEMzAwIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTEyIDJMMTUuMDkgOC4yNkwyMiA5LjI3TDE3IDE0LjE0TDE4LjE4IDIxLjAyTDEyIDE3LjU3TDUuODIgMjEuMDJMOSAxNC4xNEwyIDkuMjdMOC45MSA4LjI2TDEyIDJ6Ij48L3BhdGg+PC9zdmc+"
 
 # ================= 默认初始配置 =================
@@ -71,6 +70,7 @@ def init_db(db):
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT")
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT")
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'")
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS webhook_url TEXT")
         else:
             try: db.execute("ALTER TABLE users ADD COLUMN security_question TEXT")
             except: pass
@@ -78,11 +78,13 @@ def init_db(db):
             except: pass
             try: db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
             except: pass
+            try: db.execute("ALTER TABLE users ADD COLUMN webhook_url TEXT")
+            except: pass
         db.commit()
     except Exception: pass
 
     tables = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT)",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
         "CREATE TABLE IF NOT EXISTS period_bonus (period_key TEXT, owner_id TEXT, kind TEXT, points REAL, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS redemptions (id SERIAL PRIMARY KEY, owner_id TEXT, item TEXT, cost REAL, ts TEXT)",
@@ -629,7 +631,7 @@ def main():
         login_page(db); return
 
     current_user = st.session_state.user
-    user_row = db.execute("SELECT role FROM users WHERE username=?", (current_user,)).fetchone()
+    user_row = db.execute("SELECT * FROM users WHERE username=?", (current_user,)).fetchone()
     if not user_row:
         del st.session_state.user; st.rerun()
     
@@ -637,6 +639,23 @@ def main():
     st.session_state.role = current_role
     all_users_data = get_all_users(db)
     user_names = [u["username"] for u in all_users_data]
+
+    # ================= 主动提醒逻辑 (方案五) =================
+    if current_role != "admin" or current_role == "admin":
+        try:
+            if now.hour >= 21:
+                today_record = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), current_user)).fetchone()
+                if not today_record and user_row.get("webhook_url") and st.session_state.get(f"alerted_{today}") != True:
+                    url = user_row["webhook_url"]
+                    if "bark" in url:
+                        requests.get(f"{url}/今天还没打卡哦，连续记录快断了！", timeout=3)
+                    elif "serverchan" in url:
+                        requests.post(url, data={"title": "学习打卡提醒", "desp": "今天还没打卡哦，快去保住你的积分和连击！"}, timeout=3)
+                    else:
+                        requests.get(url, timeout=3)
+                    st.session_state[f"alerted_{today}"] = True
+        except Exception:
+            pass
 
     with st.sidebar:
         st.title("学习打卡")
@@ -676,7 +695,7 @@ def main():
             st.write(f"特殊：{bal['special']:.1f} | 消耗：-{bal['spent']:.1f}")
 
         st.divider()
-        with st.expander("账号设置"):
+        with st.expander("账号与数据设置"):
             new_name = st.text_input("新用户名", placeholder="留空则不修改")
             if st.button("确认修改用户名"):
                 if new_name and new_name != current_user:
@@ -699,6 +718,38 @@ def main():
                 if new_pwd:
                     db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_pwd), current_user))
                     db.commit(); st.success("密码已修改！")
+            
+            st.divider()
+            webhook_input = st.text_input("防遗忘提醒 Webhook (Bark/Server酱)", value=user_row.get("webhook_url") or "", help="超过21:00未打卡将推送")
+            if st.button("保存 Webhook"):
+                db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user))
+                db.commit(); st.success("保存成功！")
+            
+            # 全站数据导出（仅管理员）
+            if current_role == "admin":
+                st.divider()
+                st.write("**全站数据备份（管理员专属）**")
+                all_data = {
+                    "users": [{"username": r["username"], "role": r["role"]} for r in db.execute("SELECT username, role FROM users").fetchall()],
+                    "daily_records": [dict(r) for r in db.execute("SELECT * FROM daily_records").fetchall()],
+                    "period_bonus": [dict(r) for r in db.execute("SELECT * FROM period_bonus").fetchall()],
+                    "exam_rewards": [dict(r) for r in db.execute("SELECT * FROM exam_rewards").fetchall()],
+                    "redemptions": [dict(r) for r in db.execute("SELECT * FROM redemptions").fetchall()],
+                    "extra_points": [dict(r) for r in db.execute("SELECT * FROM extra_points").fetchall()],
+                    "special_events": [dict(r) for r in db.execute("SELECT * FROM special_events").fetchall()],
+                    "config_tasks": [dict(r) for r in db.execute("SELECT * FROM config_tasks").fetchall()],
+                    "config_shop": [dict(r) for r in db.execute("SELECT * FROM config_shop").fetchall()],
+                    "config_exam": [dict(r) for r in db.execute("SELECT * FROM config_exam").fetchall()],
+                    "config_badges": [dict(r) for r in db.execute("SELECT * FROM config_badges").fetchall()]
+                }
+                json_str = json.dumps(all_data, ensure_ascii=False, indent=2, default=str)
+                st.download_button(
+                    label="📥 导出全站备份 (JSON)",
+                    data=json_str,
+                    file_name=f"global_backup_{today.isoformat()}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
             
             st.divider()
             if st.button("退出登录"):
@@ -747,6 +798,7 @@ def main():
                 bonus, detail = compute_bonus_for_day(today, lookup, get_bonus_rules(db, view_as))
                 c1.metric("基础分", f"{base_now:.1f}"); c2.metric("Bonus", f"{bonus:.1f}"); c3.metric("预计总分", f"{base_now + bonus:.1f}")
                 if detail.get("tier") in TIER_CN: st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
+                
                 if st.button("保存今日打卡", type="primary", use_container_width=True):
                     current_today = bj_now().date()
                     save_day(db, current_today, selected_ids, view_as); st.success("已保存！"); st.rerun()
@@ -772,7 +824,6 @@ def main():
     with tab_objs[2]:
         st.subheader("历史与图表分析")
         
-        # 时间维度切换
         time_view = st.radio("选择时间维度查看走势", ["按日查看", "按周查看", "按月查看"], horizontal=True)
         
         all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
@@ -784,24 +835,20 @@ def main():
                 df_grouped = df.copy()
                 x_title = "日期 (每日)"
             elif time_view == "按周查看":
-                # 按周聚合，W-MON 表示以周一为起始
                 df_grouped = df.set_index("日期").resample('W-MON', label='left', closed='left').sum().reset_index()
                 x_title = "日期 (每周一)"
             else:
-                # 按月聚合，MS 表示 Month Start
                 df_grouped = df.set_index("日期").resample('MS').sum().reset_index()
                 x_title = "日期 (每月1日)"
             
-            # 1. 走势折线图
             st.markdown(f"**{time_view}得分走势**")
             line_chart = alt.Chart(df_grouped).mark_line(point=True, color='#1f77b4').encode(
-                x=alt.X('日期:T', title=x_title, axis=alt.Axis(labelAngle=0)),  # 强制文字水平
+                x=alt.X('日期:T', title=x_title, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y('总分:Q', title='总分', axis=alt.Axis(labelAngle=0)),
                 tooltip=[alt.Tooltip('日期:T', format='%Y-%m-%d'), '总分:Q']
             ).interactive()
             st.altair_chart(line_chart, use_container_width=True)
             
-            # 2. 柱状图对比
             st.markdown(f"**{time_view}得分柱状图**")
             bar_chart = alt.Chart(df_grouped).mark_bar().encode(
                 x=alt.X('日期:T', title=x_title, axis=alt.Axis(labelAngle=0)),
