@@ -38,7 +38,6 @@ GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 def hash_pwd(pwd: str) -> str: return hashlib.sha256(pwd.encode()).hexdigest()
 
-# ================= 并发锁，防止极端并发下的游标冲突 =================
 _DB_LOCK = threading.Lock()
 
 class DBWrapper:
@@ -974,15 +973,29 @@ def main():
                 bal = get_balance(db, view_as)
                 for name, cost in shop_items:
                     c1, c2, c3 = st.columns([5, 2, 2])
-                    c1.write(f"**{html.escape(name)}**"); c2.write(f"`{cost} 分`")
-                    if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost)):
-                        if name == "补签卡":
-                            db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
-                            db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
-                            db.commit(); st.success("兑换成功！获得 1 张补签卡。"); st.rerun()
-                        else:
-                            db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
-                            db.commit(); st.success("兑换成功！"); st.rerun()
+                    c1.write(f"**{html.escape(name)}**")
+                    c2.write(f"`{cost} 分`")
+                    
+                    confirm_key = f"confirm_buy_{view_as}_{name}"
+                    if st.session_state.get(confirm_key):
+                        cc1, cc2 = st.columns(2)
+                        if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", type="primary"):
+                            if name == "补签卡":
+                                db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
+                                db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
+                                db.commit(); st.success("兑换成功！获得 1 张补签卡。")
+                            else:
+                                db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
+                                db.commit(); st.success("兑换成功！")
+                            st.session_state[confirm_key] = False
+                            st.rerun()
+                        if cc2.button("取消", key=f"no_{view_as}_{name}"):
+                            st.session_state[confirm_key] = False
+                            st.rerun()
+                    else:
+                        if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost)):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
 
     if "兑换" in tab_dict:
         with tab_dict["兑换"]:
@@ -1031,13 +1044,28 @@ def main():
         with tab_dict["事件"]:
             st.subheader("特殊事件")
             fired = db.execute("SELECT * FROM special_events WHERE day=? AND owner_id=?", (today.isoformat(), view_as)).fetchone()
-            if fired: st.info(f"今天已经触发过啦：{html.escape(fired['note'])} +{fired['points']}分")
+            if fired: 
+                st.info(f"今天已经触发过啦：{html.escape(fired['note'])} +{fired['points']}分")
             else:
-                if st.button("摇一摇", use_container_width=True):
-                    roll = random.random()
-                    pts = random.randint(1, 2) if roll < 0.4 else random.randint(3, 5) if roll < 0.8 else random.randint(6, 8) if roll < 0.95 else random.randint(10, 15)
-                    db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (today.isoformat(), view_as, pts, "积分暴击", bj_now().isoformat()))
-                    db.commit(); st.balloons(); st.success(f"获得 {pts} 积分！"); st.rerun()
+                if st.session_state.get("confirm_roll"):
+                    st.warning("🎲 确认消耗今天的机会摇一摇吗？")
+                    rc1, rc2 = st.columns(2)
+                    if rc1.button("确认摇一摇", type="primary", use_container_width=True):
+                        roll = random.random()
+                        pts = random.randint(1, 2) if roll < 0.4 else random.randint(3, 5) if roll < 0.8 else random.randint(6, 8) if roll < 0.95 else random.randint(10, 15)
+                        db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (today.isoformat(), view_as, pts, "积分暴击", bj_now().isoformat()))
+                        db.commit()
+                        st.session_state["confirm_roll"] = False
+                        st.balloons()
+                        st.success(f"获得 {pts} 积分！")
+                        st.rerun()
+                    if rc2.button("取消", use_container_width=True):
+                        st.session_state["confirm_roll"] = False
+                        st.rerun()
+                else:
+                    if st.button("摇一摇", use_container_width=True):
+                        st.session_state["confirm_roll"] = True
+                        st.rerun()
 
     if "系统设置" in tab_dict:
         with tab_dict["系统设置"]:
@@ -1072,7 +1100,6 @@ def main():
             exam_config, exam_rules = get_exam_config(db, view_as)
             df_exam_data = []
             for k, v in exam_config.items():
-                # 如果类型是 grade，满分和分差置空，避免误解
                 max_s = v.get("max_score") if v["type"] == "score" else None
                 step_s = v.get("step") if v["type"] == "score" else None
                 df_exam_data.append({
@@ -1112,7 +1139,6 @@ def main():
                             cfg = {"type": "score", "max_score": float(row["满分"] or 150), "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
                         else:
                             if e_target not in GRADES: st.error(f"科目 {sub} 目标必须在 11 档内"); has_error = True; break
-                            # 等级模式不保存满分和分差
                             cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
                         db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
                 if has_error: db.commit()
