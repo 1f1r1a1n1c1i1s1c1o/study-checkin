@@ -872,19 +872,34 @@ def main():
                     if not rec: missing_dates.append(past_date)
                 
                 if missing_dates:
+                    sel_date = st.selectbox("选择要补签的日期", missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({WEEKDAY_CN[x.weekday()]})")
+                    
+                    # 获取那天的任务列表
+                    past_tasks = get_tasks(db, sel_date.weekday(), view_as)
+                    st.write(f"**请勾选你在 {sel_date.strftime('%m月%d日')} 实际完成的任务（提交后将强制算作满分）：**")
+                    
                     with st.form("makeup_form"):
-                        sel_date = st.selectbox("选择要补签的日期", missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({WEEKDAY_CN[x.weekday()]})")
-                        st.caption("补签将使用当天的满分标准为您记录。")
-                        if st.form_submit_button("使用 1 张补签卡", type="primary"):
+                        selected_past_ids = []
+                        for t in past_tasks:
+                            if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}"):
+                                selected_past_ids.append(t["id"])
+                        
+                        if st.form_submit_button("使用 1 张补签卡并提交", type="primary"):
                             t_thr = get_thresholds(db, view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
+                            
+                            # 扣卡
                             db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (current_user,))
+                            
+                            # 插入记录：保存勾选的任务，但 base_score 强制拉满
                             db.execute("""
                                 INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) 
-                                VALUES (?, ?, '["补签"]', ?, 0, '{}', ?, ?, ?, ?)
-                            """, (sel_date.isoformat(), view_as, t_thr["full"], t_thr["full"], bj_now().isoformat(), t_thr["basic"], t_thr["full"]))
+                                VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)
+                            """, (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], bj_now().isoformat(), t_thr["basic"], t_thr["full"]))
                             db.commit()
-                            recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as)
-                            st.success("补签成功！")
+                            
+                            recalc_all_bonus(db, view_as)
+                            settle_longterm_bonus(db, view_as)
+                            st.success("补签成功！当日已记录，且总分已算作满分。")
                             st.rerun()
                 else:
                     st.info("最近 7 天都全勤了，太棒了，无需补签！")
