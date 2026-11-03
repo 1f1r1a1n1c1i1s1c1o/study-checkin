@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, random, os, hashlib, urllib.parse, re, html, requests
+import json, random, os, hashlib, urllib.parse, re, html, requests, threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import streamlit as st
@@ -38,19 +38,34 @@ GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 def hash_pwd(pwd: str) -> str: return hashlib.sha256(pwd.encode()).hexdigest()
 
+# ================= 并发锁，防止极端并发下的游标冲突 =================
+_DB_LOCK = threading.Lock()
+
 class DBWrapper:
     def __init__(self, conn, is_cloud):
         self.conn = conn; self.is_cloud = is_cloud
     def execute(self, query, params=()):
-        if self.is_cloud:
-            query = query.replace("?", "%s")
-            cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            if params: cur.execute(query, params)
-            else: cur.execute(query)
-            return cur
-        else: 
-            return self.conn.execute(query, params)
-    def commit(self): self.conn.commit()
+        with _DB_LOCK:
+            if self.is_cloud:
+                query = query.replace("?", "%s")
+                cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                if params: cur.execute(query, params)
+                else: cur.execute(query)
+                
+                # 强制在锁内读取结果，返回伪游标，防止多个用户同时读取时游标被覆盖
+                if cur.description:
+                    rows = cur.fetchall()
+                    class FakeCursor:
+                        def __init__(self, r): self.r = r
+                        def fetchone(self): return self.r[0] if self.r else None
+                        def fetchall(self): return self.r
+                    return FakeCursor(rows)
+                return cur
+            else: 
+                return self.conn.execute(query, params)
+    def commit(self):
+        with _DB_LOCK:
+            self.conn.commit()
 
 @st.cache_resource(show_spinner=False)
 def get_db():
@@ -186,7 +201,7 @@ def init_db(db):
 def init_old_admin_data(db):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
     DEFAULT_SHOP = [("专属夸夸", 6)]
-    DEFAULT_EXAM_CONFIG = {"语文": {"type": "score", "target": 105.0, "step": 3.0, "step_points": 2.0}}
+    DEFAULT_EXAM_CONFIG = {"语文": {"type": "score", "max_score": 150, "target": 105.0, "step": 3.0, "step_points": 2.0}}
     DEFAULT_THRESHOLDS = {0: {"basic": 8.0, "full": 11.0}}
     for t in DEFAULT_TASKS: db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (t[0], t[1], "晴", t[2], t[3], t[4]))
     for s in DEFAULT_SHOP: db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", ("晴", s[0], s[1]))
@@ -212,7 +227,6 @@ def get_tasks(db, weekday, oid):
     rows = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=?", (weekday, oid)).fetchall()
     return [{"id": r["id"], "category": r["category"], "name": r["name"], "points": r["points"]} for r in rows]
 
-# 【修复点】强制在获取商城时注入补签卡
 def get_shop(db, oid):
     items = [(r["name"], r["cost"]) for r in db.execute("SELECT * FROM config_shop WHERE owner_id=?", (oid,)).fetchall()]
     if not any(i[0] == "补签卡" for i in items):
@@ -792,7 +806,7 @@ def main():
     tab_objs = st.tabs(tabs)
     tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
 
-    with tab_dict["打卡"]:
+    with tab_dict.get("打卡"):
         tasks = get_tasks(db, today.weekday(), view_as)
         if not tasks:
             st.warning("今日还没有配置任务哦，请去【系统设置】里添加！")
@@ -874,7 +888,6 @@ def main():
                 if missing_dates:
                     sel_date = st.selectbox("选择要补签的日期", missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({WEEKDAY_CN[x.weekday()]})")
                     
-                    # 获取那天的任务列表
                     past_tasks = get_tasks(db, sel_date.weekday(), view_as)
                     st.write(f"**请勾选你在 {sel_date.strftime('%m月%d日')} 实际完成的任务（提交后将强制算作满分）：**")
                     
@@ -885,22 +898,29 @@ def main():
                                 selected_past_ids.append(t["id"])
                         
                         if st.form_submit_button("使用 1 张补签卡并提交", type="primary"):
-                            t_thr = get_thresholds(db, view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
-                            
-                            # 扣卡
-                            db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (current_user,))
-                            
-                            # 插入记录：保存勾选的任务，但 base_score 强制拉满
-                            db.execute("""
-                                INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) 
-                                VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)
-                            """, (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], bj_now().isoformat(), t_thr["basic"], t_thr["full"]))
-                            db.commit()
-                            
-                            recalc_all_bonus(db, view_as)
-                            settle_longterm_bonus(db, view_as)
-                            st.success("补签成功！当日已记录，且总分已算作满分。")
-                            st.rerun()
+                            # 修复：并发检查余额并立刻扣减
+                            curr_cards = db.execute("SELECT makeup_cards FROM users WHERE username=?", (current_user,)).fetchone()["makeup_cards"]
+                            if curr_cards > 0:
+                                db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (current_user,))
+                                db.commit()
+                                
+                                t_thr = get_thresholds(db, view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
+                                
+                                # 防止已有记录导致主键冲突，先删后插
+                                db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
+                                
+                                db.execute("""
+                                    INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) 
+                                    VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)
+                                """, (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], bj_now().isoformat(), t_thr["basic"], t_thr["full"]))
+                                db.commit()
+                                
+                                recalc_all_bonus(db, view_as)
+                                settle_longterm_bonus(db, view_as)
+                                st.success("补签成功！当日已记录，且总分已算作满分。")
+                                st.rerun()
+                            else:
+                                st.error("补签失败，你的补签卡余额不足。")
                 else:
                     st.info("最近 7 天都全勤了，太棒了，无需补签！")
             else:
@@ -947,31 +967,32 @@ def main():
                 st.caption(f"当时判定标准：基本 {row.get('basic_thr')} 分 / 满分 {row.get('full_thr')} 分")
             else: st.info("暂无记录")
 
-    with tab_dict["商城"]:
-        st.subheader("商城")
-        # 强制读取时包含补签卡
-        shop_items = get_shop(db, view_as)
-        if not shop_items:
-            st.warning("商城还是空的哦，请去【系统设置】里添加奖励！")
-        else:
-            bal = get_balance(db, view_as)
-            for name, cost in shop_items:
-                c1, c2, c3 = st.columns([5, 2, 2])
-                c1.write(f"**{html.escape(name)}**"); c2.write(f"`{cost} 分`")
-                if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost)):
-                    if name == "补签卡":
-                        db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
-                        db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
-                        db.commit(); st.success("兑换成功！获得 1 张补签卡。"); st.rerun()
-                    else:
-                        db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
-                        db.commit(); st.success("兑换成功！"); st.rerun()
+    if "商城" in tab_dict:
+        with tab_dict["商城"]:
+            st.subheader("商城")
+            shop_items = get_shop(db, view_as)
+            if not shop_items:
+                st.warning("商城还是空的哦，请去【系统设置】里添加奖励！")
+            else:
+                bal = get_balance(db, view_as)
+                for name, cost in shop_items:
+                    c1, c2, c3 = st.columns([5, 2, 2])
+                    c1.write(f"**{html.escape(name)}**"); c2.write(f"`{cost} 分`")
+                    if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost)):
+                        if name == "补签卡":
+                            db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
+                            db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
+                            db.commit(); st.success("兑换成功！获得 1 张补签卡。"); st.rerun()
+                        else:
+                            db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
+                            db.commit(); st.success("兑换成功！"); st.rerun()
 
-    with tab_dict["兑换"]:
-        st.subheader("兑换历史")
-        rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
-        if rows: st.dataframe([{"时间": r["ts"], "奖励": html.escape(r["item"]), "消耗": r["cost"]} for r in rows], use_container_width=True)
-        else: st.info("暂无")
+    if "兑换" in tab_dict:
+        with tab_dict["兑换"]:
+            st.subheader("兑换历史")
+            rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
+            if rows: st.dataframe([{"时间": r["ts"], "奖励": html.escape(r["item"]), "消耗": r["cost"]} for r in rows], use_container_width=True)
+            else: st.info("暂无")
 
     if "考试" in tab_dict:
         with tab_dict["考试"]:
@@ -988,7 +1009,9 @@ def main():
                         if i + j < len(subjects_list):
                             sub = subjects_list[i + j]; cfg = exam_config[sub]
                             with cols[j]:
-                                if cfg["type"] == "score": scores[sub] = st.number_input(f"{html.escape(sub)} (目标{cfg['target']})", value=float(cfg['target']), key=f"ex_{view_as}_{sub}")
+                                if cfg["type"] == "score": 
+                                    max_s = float(cfg.get("max_score", 150))
+                                    scores[sub] = st.number_input(f"{html.escape(sub)} (满分{max_s:.0f}, 目标{cfg['target']})", min_value=0.0, max_value=max_s, value=float(cfg['target']), key=f"ex_{view_as}_{sub}")
                                 else: 
                                     target_idx = GRADES.index(cfg['target']) if cfg['target'] in GRADES else 0
                                     scores[sub] = st.selectbox(f"{html.escape(sub)} (目标{cfg['target']})", GRADES, index=target_idx, key=f"ex_sel_{view_as}_{sub}")
@@ -1052,15 +1075,16 @@ def main():
             exam_config, exam_rules = get_exam_config(db, view_as)
             df_exam_data = []
             for k, v in exam_config.items():
-                df_exam_data.append({"科目": k, "类型": v["type"], "目标": str(v["target"]), "分差": v.get("step", 0), "单档奖励": v["step_points"]})
+                df_exam_data.append({"科目": k, "类型": v["type"], "满分": v.get("max_score", 150), "目标": str(v["target"]), "分差": v.get("step", 0), "单档奖励": v["step_points"]})
             df_exam = pd.DataFrame(df_exam_data)
-            if df_exam.empty: df_exam = pd.DataFrame(columns=["科目", "类型", "目标", "分差", "单档奖励"])
+            if df_exam.empty: df_exam = pd.DataFrame(columns=["科目", "类型", "满分", "目标", "分差", "单档奖励"])
 
             edited_exam = st.data_editor(
                 df_exam,
                 column_config={
                     "科目": st.column_config.TextColumn("科目", required=True),
                     "类型": st.column_config.SelectboxColumn("类型", options=["score", "grade"], required=True, help="score=按分数，grade=按等级"),
+                    "满分": st.column_config.NumberColumn("满分", min_value=0.0, step=1.0, help="仅分数模式有效"),
                     "目标": st.column_config.TextColumn("目标", required=True, help="填数字(如105) 或 等级(如A+)"),
                     "分差": st.column_config.NumberColumn("分差", min_value=0.0, step=1.0, help="仅分数模式有效"),
                     "单档奖励": st.column_config.NumberColumn("单档奖励", min_value=0.0, step=0.5)
@@ -1078,7 +1102,7 @@ def main():
                         if e_type == "score":
                             try: e_target_val = float(e_target)
                             except ValueError: st.error(f"科目 {sub} 目标必须是数字"); has_error = True; break
-                            cfg = {"type": "score", "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
+                            cfg = {"type": "score", "max_score": float(row["满分"] or 150), "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
                         else:
                             if e_target not in GRADES: st.error(f"科目 {sub} 目标必须在 11 档内"); has_error = True; break
                             cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
