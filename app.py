@@ -49,6 +49,7 @@ def get_db():
         conn.row_factory = sqlite3.Row; db = DBWrapper(conn, False); init_db(db); return db
 
 def init_db(db):
+    # 1. 确保所有新老表存在
     tables = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user')",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, PRIMARY KEY(day, owner_id))",
@@ -67,19 +68,30 @@ def init_db(db):
     ]
     for t in tables: db.execute(t)
     
-    # 数据库升级兼容 (老库补充 role 列)
-    try: db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
-    except: pass
-    try: db.execute("ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'")
-    except: pass
+    # 2. 【核心修复】强制给所有涉及多用户的表补充 owner_id 列（防报错关键）
+    alter_tables = [
+        "daily_records", "period_bonus", "redemptions", "exam_rewards", 
+        "special_events", "extra_points", "config_tasks", "config_shop", 
+        "config_exam", "config_exam_rules", "config_thresholds", 
+        "config_bonus_rules", "config_exam_multihit"
+    ]
+    for tbl in alter_tables:
+        try: 
+            db.execute(f"ALTER TABLE {tbl} ADD COLUMN owner_id TEXT DEFAULT '晴'")
+        except Exception: 
+            pass # 如果列已存在则忽略异常
+            
+    try: 
+        db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+    except Exception: 
+        pass
     
-    # 初始化超级管理员“晴”
+    # 3. 初始化超级管理员“晴”
     if not db.execute("SELECT * FROM users WHERE username='晴'").fetchone():
         db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')", ("晴", hash_pwd("123456")))
         if not db.execute("SELECT * FROM config_tasks WHERE owner_id='晴'").fetchone():
             init_old_admin_data(db)
     else:
-        # 如果“晴”存在但没角色（旧库），升级为 admin
         db.execute("UPDATE users SET role='admin' WHERE username='晴'")
 
 def init_old_admin_data(db):
