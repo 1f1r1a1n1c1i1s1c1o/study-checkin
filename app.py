@@ -54,7 +54,7 @@ def get_db():
 def init_db(db):
     # 1. 基础建表
     tables = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user')",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
         "CREATE TABLE IF NOT EXISTS period_bonus (period_key TEXT, owner_id TEXT, kind TEXT, points REAL, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS redemptions (id SERIAL PRIMARY KEY, owner_id TEXT, item TEXT, cost REAL, ts TEXT)",
@@ -74,9 +74,12 @@ def init_db(db):
         except: pass
     db.commit()
     
-    # 2. 强行补列（给老数据库追加字段）
+    # 2. 强行补列
     if db.is_cloud:
         alter_queries = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS basic_thr REAL",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS full_thr REAL",
@@ -91,8 +94,7 @@ def init_db(db):
             "ALTER TABLE config_exam_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE config_thresholds ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE config_bonus_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE config_exam_multihit ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'"
+            "ALTER TABLE config_exam_multihit ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'"
         ]
         for q in alter_queries:
             try: db.execute(q)
@@ -100,6 +102,9 @@ def init_db(db):
         db.commit()
     else:
         alter_queries = [
+            "ALTER TABLE users ADD COLUMN security_question TEXT",
+            "ALTER TABLE users ADD COLUMN security_answer TEXT",
+            "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'",
             "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE daily_records ADD COLUMN basic_thr REAL",
             "ALTER TABLE daily_records ADD COLUMN full_thr REAL",
@@ -114,8 +119,7 @@ def init_db(db):
             "ALTER TABLE config_exam_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE config_thresholds ADD COLUMN owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE config_bonus_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE config_exam_multihit ADD COLUMN owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'"
+            "ALTER TABLE config_exam_multihit ADD COLUMN owner_id TEXT DEFAULT '晴'"
         ]
         for q in alter_queries:
             try: db.execute(q)
@@ -126,14 +130,13 @@ def init_db(db):
     try:
         row = db.execute("SELECT * FROM users WHERE username='晴'").fetchone()
         if not row:
-            db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')", ("晴", hash_pwd("123456")))
+            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'admin', '管理员默认密保', '123456')", ("晴", hash_pwd("123456")))
             if not db.execute("SELECT * FROM config_tasks WHERE owner_id='晴'").fetchone():
                 init_old_admin_data(db)
         else:
             db.execute("UPDATE users SET role='admin' WHERE username='晴'")
         db.commit()
-    except Exception as e:
-        # 捕获异常防止卡死
+    except Exception:
         pass
 
 def init_old_admin_data(db):
@@ -171,10 +174,8 @@ def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict) -> tuple[f
     key = day.isoformat(); rec = lookup.get(key)
     if rec is None: return 0.0, {}
     base = float(rec["base_score"]); wd = day.weekday()
-    
     basic_thr = rec.get("basic_thr") or 0
     full_thr = rec.get("full_thr") or 0
-    
     if wd <= 4:
         if base < basic_thr: return 0.0, {"tier": "none"}
         streak_days = []; cur = day
@@ -189,13 +190,11 @@ def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict) -> tuple[f
                 else: break
             streak = len(streak_days)
             all_full = all(float(lookup[x.isoformat()]["base_score"]) >= (lookup[x.isoformat()].get("full_thr") or 999) for x in streak_days)
-        
         rule = bonus_rules.get("weekday", DEFAULT_BONUS_RULES["weekday"])
         if streak >= 4: tier = "streak4"; bonus = rule[tier]["full_points"] if all_full else rule[tier]["points"]
         elif streak >= 2: tier = "streak2"; bonus = rule[tier]["full_points"] if all_full else rule[tier]["points"]
         else: tier = "single"; bonus = rule[tier]["full_points"] if base >= full_thr else rule[tier]["points"]
         return float(bonus), {"tier": tier, "streak": streak}
-    
     if base < basic_thr: return 0.0, {"tier": "none"}
     rule = bonus_rules.get("weekend", DEFAULT_BONUS_RULES["weekend"])["single"]; bonus = rule["full_points"] if base >= full_thr else rule["points"]
     return float(bonus), {"tier": "weekend_single"}
@@ -214,12 +213,9 @@ def settle_longterm_bonus(db, oid):
     bonus_rules = get_bonus_rules(db, oid)
     rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
     scores = {r["day"]: r for r in rows}
-    
     db.execute("DELETE FROM period_bonus WHERE owner_id=?", (oid,))
     if not scores: 
         db.commit(); return
-
-    # --- 周结算 ---
     weeks = {}
     for ds in scores:
         d = date.fromisoformat(ds); y, w, _ = d.isocalendar()
@@ -228,20 +224,13 @@ def settle_longterm_bonus(db, oid):
         monday = min(dlist) - timedelta(days=min(dlist).weekday())
         full_week = [monday + timedelta(days=i) for i in range(7)]
         if not all(x.isoformat() in scores for x in full_week): continue
-        
         basic_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("basic_thr") or 999) for x in full_week)
         full_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("full_thr") or 999) for x in full_week)
-        
         target_kind, target_pts = None, 0.0
-        if full_ok:
-            target_kind = "完美一周"; target_pts = bonus_rules["longterm"]["week_full"]
-        elif basic_ok:
-            target_kind = "整周达标"; target_pts = bonus_rules["longterm"]["week_basic"]
-        
+        if full_ok: target_kind = "完美一周"; target_pts = bonus_rules["longterm"]["week_full"]
+        elif basic_ok: target_kind = "整周达标"; target_pts = bonus_rules["longterm"]["week_basic"]
         if target_kind:
             db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"W:{wk}", oid, target_kind, target_pts, bj_now().isoformat()))
-    
-    # --- 月结算 ---
     months = {}
     for ds in scores:
         d = date.fromisoformat(ds); y, m = d.year, d.month
@@ -256,16 +245,11 @@ def settle_longterm_bonus(db, oid):
             alldays.append(cur)
             cur += timedelta(days=1)
         if not all(x.isoformat() in scores for x in alldays): continue
-        
         basic_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("basic_thr") or 999) for x in alldays)
         full_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("full_thr") or 999) for x in alldays)
-        
         target_kind, target_pts = None, 0.0
-        if full_ok:
-            target_kind = "完美一月"; target_pts = bonus_rules["longterm"]["month_full"]
-        elif basic_ok:
-            target_kind = "整月达标"; target_pts = bonus_rules["longterm"]["month_basic"]
-            
+        if full_ok: target_kind = "完美一月"; target_pts = bonus_rules["longterm"]["month_full"]
+        elif basic_ok: target_kind = "整月达标"; target_pts = bonus_rules["longterm"]["month_basic"]
         if target_kind:
             db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"M:{mk}", oid, target_kind, target_pts, bj_now().isoformat()))
     db.commit()
@@ -310,24 +294,22 @@ def save_day(db, day: date, done_ids: list[str], oid: str):
     tasks = get_tasks(db, day.weekday(), oid)
     base = sum(t["points"] for t in tasks if t["id"] in set(done_ids))
     ts = bj_now().isoformat(timespec="seconds")
-    
     thresholds = get_thresholds(db, oid)
     thr = thresholds.get(day.weekday(), {"basic": 0, "full": 0})
-    
     db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (day.isoformat(), oid))
     db.execute("""
         INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) 
         VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)
     """, (day.isoformat(), oid, json.dumps(sorted(done_ids)), base, base, ts, thr["basic"], thr["full"]))
     db.commit()
-    
     recalc_all_bonus(db, oid)
     settle_longterm_bonus(db, oid)
 
 # ================= 页面渲染 =================
 def login_page(db):
     st.title("学习打卡系统")
-    tab1, tab2 = st.tabs(["登录", "注册"])
+    tab1, tab2, tab3 = st.tabs(["登录", "注册", "找回密码"])
+    
     with tab1:
         with st.form("login_form"):
             u = st.text_input("用户名"); p = st.text_input("密码", type="password")
@@ -338,17 +320,45 @@ def login_page(db):
                     st.session_state.role = user["role"]
                     st.rerun()
                 else: st.error("用户名或密码错误")
+                
     with tab2:
         with st.form("reg_form"):
             u = st.text_input("设置用户名"); p = st.text_input("设置密码", type="password"); p2 = st.text_input("确认密码", type="password")
+            sq = st.text_input("密保问题 (如：我的幸运数字？)")
+            sa = st.text_input("密保答案")
             if st.form_submit_button("注册", type="primary", use_container_width=True):
-                if not u or not p: st.error("请填写完整")
+                if not u or not p or not sq or not sa: st.error("请填写所有字段（含密保）")
                 elif p != p2: st.error("密码不一致")
                 elif db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error("用户名已存在")
                 else:
-                    db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'user')", (u, hash_pwd(p)))
+                    db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'user', ?, ?)", (u, hash_pwd(p), sq, hash_pwd(sa.strip().lower())))
                     db.commit()
-                    st.success("注册成功！请去登录，并在“系统设置”里创建你的任务和奖励吧！")
+                    st.success("注册成功！请去登录。")
+
+    with tab3:
+        st.write("输入用户名，验证密保问题后重设密码。")
+        u_reset = st.text_input("请输入你的用户名", key="reset_u")
+        if u_reset:
+            user = db.execute("SELECT * FROM users WHERE username=?", (u_reset,)).fetchone()
+            if user:
+                sq = user.get("security_question")
+                if not sq:
+                    st.warning("该账户未设置密保问题，请联系管理员重置密码。")
+                else:
+                    with st.form("reset_form"):
+                        st.info(f"密保问题：{sq}")
+                        ans = st.text_input("密保答案")
+                        new_p = st.text_input("新密码", type="password")
+                        if st.form_submit_button("确认重置密码", type="primary"):
+                            if not ans or not new_p: st.error("请填写完整")
+                            elif hash_pwd(ans.strip().lower()) == user["security_answer"]:
+                                db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_p), u_reset))
+                                db.commit()
+                                st.success("密码重置成功！请去登录。")
+                            else:
+                                st.error("密保答案错误！")
+            else:
+                st.error("该用户名不存在")
 
 def main():
     st.set_page_config(page_title="学习打卡系统", layout="centered", initial_sidebar_state="collapsed")
@@ -649,7 +659,7 @@ def main():
                 uname = u["username"]
                 urole = u["role"]
                 
-                c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
+                c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
                 c1.write(f"用户：**{uname}**")
                 
                 if urole == "admin":
@@ -664,8 +674,13 @@ def main():
                         db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
                         db.commit(); st.rerun()
                 
+                # 重置密码按钮
+                if c4.button("重置密码", key=f"reset_{uname}"):
+                    db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd("123456"), uname))
+                    db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
+                
                 if uname != current_user:
-                    if c4.button("删除账号", key=f"del_{uname}"):
+                    if c5.button("删除账号", key=f"del_{uname}"):
                         for tbl in ["users", "daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
                             col = "username" if tbl == "users" else "owner_id"
                             db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
