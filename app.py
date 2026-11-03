@@ -22,7 +22,6 @@ WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周�
 
 DEFAULT_ICON_BASE64 = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZEMzAwIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTEyIDJMMTUuMDkgOC4yNkwyMiA5LjI3TDE3IDE0LjE0TDE4LjE4IDIxLjAyTDEyIDE3LjU3TDUuODIgMjEuMDJMOSAxNC4xNEwyIDkuMjdMOC45MSA4LjI2TDEyIDJ6Ij48L3BhdGg+PC9zdmc+"
 
-# ================= 默认初始配置 =================
 DEFAULT_BONUS_RULES = {
     "weekday": {"single": {"points": 1.0, "full_points": 2.0}, "streak2": {"points": 1.5, "full_points": 3.0}, "streak4": {"points": 2.5, "full_points": 5.0}}, 
     "weekend": {"single": {"points": 1.0, "full_points": 2.0}}, 
@@ -39,7 +38,6 @@ GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 def hash_pwd(pwd: str) -> str: return hashlib.sha256(pwd.encode()).hexdigest()
 
-# ================= 数据库底层封装 =================
 class DBWrapper:
     def __init__(self, conn, is_cloud):
         self.conn = conn; self.is_cloud = is_cloud
@@ -163,16 +161,6 @@ def init_db(db):
             db.execute("UPDATE users SET role='admin' WHERE username='晴'")
         db.commit()
     except Exception: pass
-    
-    # 【自动注入补签卡】如果商城里没有补签卡，就自动加进去
-    try:
-        for u in get_all_users(db):
-            uname = u["username"]
-            has_makeup = db.execute("SELECT * FROM config_shop WHERE owner_id=? AND name='补签卡'", (uname,)).fetchone()
-            if not has_makeup:
-                db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?, '补签卡', 25)", (uname,))
-        db.commit()
-    except Exception: pass
 
     try:
         global_badge_count = db.execute("SELECT COUNT(*) as c FROM config_badges WHERE owner_id='system'").fetchone()["c"]
@@ -223,7 +211,14 @@ def get_bonus_rules(db, oid):
 def get_tasks(db, weekday, oid):
     rows = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=?", (weekday, oid)).fetchall()
     return [{"id": r["id"], "category": r["category"], "name": r["name"], "points": r["points"]} for r in rows]
-def get_shop(db, oid): return [(r["name"], r["cost"]) for r in db.execute("SELECT * FROM config_shop WHERE owner_id=?", (oid,)).fetchall()]
+
+# 【修复点】强制在获取商城时注入补签卡
+def get_shop(db, oid):
+    items = [(r["name"], r["cost"]) for r in db.execute("SELECT * FROM config_shop WHERE owner_id=?", (oid,)).fetchall()]
+    if not any(i[0] == "补签卡" for i in items):
+        items.insert(0, ("补签卡", 25))
+    return items
+
 def get_exam_config(db, oid):
     subjects = {r["subject"]: json.loads(r["config_json"]) for r in db.execute("SELECT * FROM config_exam WHERE owner_id=?", (oid,)).fetchall()}
     rule_row = db.execute("SELECT config_json FROM config_exam_rules WHERE owner_id=?", (oid,)).fetchone()
@@ -452,7 +447,6 @@ def save_day(db, day: date, done_ids: list[str], oid: str):
     recalc_all_bonus(db, oid)
     settle_longterm_bonus(db, oid)
 
-# ================= 动态徽章判定逻辑 =================
 def get_user_badges(db, oid):
     try:
         configs = get_badge_configs(db)
@@ -494,7 +488,6 @@ def get_user_badges(db, oid):
             continue
     return earned
 
-# ================= 前端计时器组件 =================
 def render_timer():
     timer_html = """
     <style>
@@ -579,7 +572,6 @@ def render_timer():
     """
     return components.html(timer_html, height=220)
 
-# ================= 页面渲染 =================
 def login_page(db):
     st.title("学习打卡系统")
     tab1, tab2, tab3 = st.tabs(["登录", "注册", "找回密码"])
@@ -672,7 +664,6 @@ def main():
     with st.sidebar:
         st.title("学习打卡")
         
-        # 手机精简模式开关
         is_mobile_mode = st.checkbox("📱 手机精简模式", value=False, help="开启后仅保留核心功能，隐藏复杂配置")
         
         if current_role == "admin":
@@ -792,7 +783,6 @@ def main():
             del st.session_state.role
             st.rerun()
 
-    # 精简模式：只显示打卡、商城、兑换，以及设置（管理员需要）
     if is_mobile_mode:
         tabs = ["打卡", "商城", "兑换"]
         if current_role == "admin": tabs.append("系统设置")
@@ -800,8 +790,6 @@ def main():
         tabs = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件", "系统设置"]
         
     tab_objs = st.tabs(tabs)
-    
-    # 记录当前 Tab 索引，方便下面分发
     tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
 
     with tab_dict["打卡"]:
@@ -823,12 +811,10 @@ def main():
             for cat, items in cats.items():
                 st.markdown(f"**{html.escape(cat)}**")
                 if is_mobile_mode:
-                    # 手机端极端单列
                     for t in items:
                         if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{today}_{view_as}_{t['id']}", disabled=already_done):
                             if not already_done: selected_ids.append(t["id"])
                 else:
-                    # 电脑端双列
                     cols = st.columns(2)
                     for i, t in enumerate(items):
                         with cols[i % 2]:
@@ -948,6 +934,7 @@ def main():
 
     with tab_dict["商城"]:
         st.subheader("商城")
+        # 强制读取时包含补签卡
         shop_items = get_shop(db, view_as)
         if not shop_items:
             st.warning("商城还是空的哦，请去【系统设置】里添加奖励！")
