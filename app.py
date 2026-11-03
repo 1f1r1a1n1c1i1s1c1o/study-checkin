@@ -66,25 +66,35 @@ def init_db(db):
         "CREATE TABLE IF NOT EXISTS config_bonus_rules (owner_id TEXT PRIMARY KEY, rules_json TEXT)",
         "CREATE TABLE IF NOT EXISTS config_exam_multihit (hit_count INTEGER, owner_id TEXT, points REAL, PRIMARY KEY(hit_count, owner_id))"
     ]
-    for t in tables: db.execute(t)
+    for t in tables:
+        try:
+            db.execute(t); db.commit()
+        except Exception:
+            if not db.is_cloud: db.conn.rollback()
     
-    # 2. 【核心修复】强制给所有涉及多用户的表补充 owner_id 列（防报错关键）
-    alter_tables = [
-        "daily_records", "period_bonus", "redemptions", "exam_rewards", 
-        "special_events", "extra_points", "config_tasks", "config_shop", 
-        "config_exam", "config_exam_rules", "config_thresholds", 
-        "config_bonus_rules", "config_exam_multihit"
+    # 2. 【核心修复】逐个安全地补充缺失的列
+    # 每一次执行完立刻 commit，如果报错说明列已存在，立刻 rollback，不影响下一个表的补列
+    alter_queries = [
+        "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE period_bonus ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE redemptions ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE exam_rewards ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE special_events ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE extra_points ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE config_tasks ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE config_shop ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE config_exam ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE config_exam_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE config_thresholds ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE config_bonus_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE config_exam_multihit ADD COLUMN owner_id TEXT DEFAULT '晴'",
+        "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'"
     ]
-    for tbl in alter_tables:
-        try: 
-            db.execute(f"ALTER TABLE {tbl} ADD COLUMN owner_id TEXT DEFAULT '晴'")
-        except Exception: 
-            pass # 如果列已存在则忽略异常
-            
-    try: 
-        db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
-    except Exception: 
-        pass
+    for q in alter_queries:
+        try:
+            db.execute(q); db.commit()
+        except Exception:
+            if not db.is_cloud: db.conn.rollback() # SQLite 必须手动回滚，PG 有 autocommit 可以直接忽略
     
     # 3. 初始化超级管理员“晴”
     if not db.execute("SELECT * FROM users WHERE username='晴'").fetchone():
@@ -93,6 +103,7 @@ def init_db(db):
             init_old_admin_data(db)
     else:
         db.execute("UPDATE users SET role='admin' WHERE username='晴'")
+        db.commit()
 
 def init_old_admin_data(db):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
@@ -241,10 +252,8 @@ def main():
         login_page(db); return
 
     current_user = st.session_state.user
-    # 每次刷新都实时校验最新的权限，防止自己把自己降级了但没刷新
     user_row = db.execute("SELECT role FROM users WHERE username=?", (current_user,)).fetchone()
     if not user_row:
-        # 账号被删了
         del st.session_state.user; st.rerun()
     
     current_role = user_row["role"]
@@ -541,14 +550,12 @@ def main():
                 uname = u["username"]
                 urole = u["role"]
                 
-                # 分成4列，方便排版
                 c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
                 c1.write(f"用户：**{uname}**")
                 
-                # 权限显示与控制
                 if urole == "admin":
                     c2.success("🟢 管理员")
-                    if uname != current_user: # 防止自己降级自己，如果非要降级，允许，但给个确认
+                    if uname != current_user: 
                         if c3.button("降级为普通用户", key=f"demote_{uname}"):
                             db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
                             db.commit(); st.rerun()
@@ -558,7 +565,6 @@ def main():
                         db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
                         db.commit(); st.rerun()
                 
-                # 删除按钮 (不能删自己)
                 if uname != current_user:
                     if c4.button("删除账号", key=f"del_{uname}"):
                         for tbl in ["users", "daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
