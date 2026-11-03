@@ -34,8 +34,11 @@ class DBWrapper:
         if self.is_cloud:
             query = query.replace("?", "%s")
             cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute(query, params); return cur
-        else: return self.conn.execute(query, params)
+            if params: cur.execute(query, params)
+            else: cur.execute(query)
+            return cur
+        else: 
+            return self.conn.execute(query, params)
     def commit(self): self.conn.commit()
 
 @st.cache_resource(show_spinner=False)
@@ -49,61 +52,86 @@ def get_db():
         conn.row_factory = sqlite3.Row; db = DBWrapper(conn, False); init_db(db); return db
 
 def init_db(db):
-    # 1. 确保所有新老表存在
+    # 1. 基础建表
     tables = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user')",
-        "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, PRIMARY KEY(day, owner_id))",
-        "CREATE TABLE IF NOT EXISTS period_bonus (period_key TEXT, owner_id TEXT, kind TEXT, points REAL, ts TEXT, PRIMARY KEY(period_key, owner_id))",
+        "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
+        "CREATE TABLE IF NOT EXISTS period_bonus (period_key TEXT, owner_id TEXT, kind TEXT, points REAL, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS redemptions (id SERIAL PRIMARY KEY, owner_id TEXT, item TEXT, cost REAL, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS exam_rewards (id SERIAL PRIMARY KEY, owner_id TEXT, detail TEXT, points REAL, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS special_events (id SERIAL PRIMARY KEY, day TEXT, owner_id TEXT, points REAL, note TEXT, ts TEXT)",
         "CREATE TABLE IF NOT EXISTS extra_points (id SERIAL PRIMARY KEY, owner_id TEXT, name TEXT, points REAL, ts TEXT)",
-        "CREATE TABLE IF NOT EXISTS config_tasks (id TEXT, weekday INTEGER, owner_id TEXT, category TEXT, name TEXT, points REAL, PRIMARY KEY (id, weekday, owner_id))",
+        "CREATE TABLE IF NOT EXISTS config_tasks (id TEXT, weekday INTEGER, owner_id TEXT, category TEXT, name TEXT, points REAL)",
         "CREATE TABLE IF NOT EXISTS config_shop (id SERIAL PRIMARY KEY, owner_id TEXT, name TEXT, cost REAL)",
-        "CREATE TABLE IF NOT EXISTS config_exam (subject TEXT, owner_id TEXT, config_json TEXT, PRIMARY KEY(subject, owner_id))",
+        "CREATE TABLE IF NOT EXISTS config_exam (subject TEXT, owner_id TEXT, config_json TEXT)",
         "CREATE TABLE IF NOT EXISTS config_exam_rules (owner_id TEXT PRIMARY KEY, config_json TEXT)",
-        "CREATE TABLE IF NOT EXISTS config_thresholds (weekday INTEGER, owner_id TEXT, basic REAL, \"full\" REAL, PRIMARY KEY(weekday, owner_id))",
+        "CREATE TABLE IF NOT EXISTS config_thresholds (weekday INTEGER, owner_id TEXT, basic REAL, \"full\" REAL)",
         "CREATE TABLE IF NOT EXISTS config_bonus_rules (owner_id TEXT PRIMARY KEY, rules_json TEXT)",
-        "CREATE TABLE IF NOT EXISTS config_exam_multihit (hit_count INTEGER, owner_id TEXT, points REAL, PRIMARY KEY(hit_count, owner_id))"
+        "CREATE TABLE IF NOT EXISTS config_exam_multihit (hit_count INTEGER, owner_id TEXT, points REAL)"
     ]
     for t in tables:
-        try:
-            db.execute(t); db.commit()
-        except Exception:
-            if not db.is_cloud: db.conn.rollback()
+        try: db.execute(t)
+        except: pass
+    db.commit()
     
-    # 2. 【核心修复】逐个安全地补充缺失的列
-    # 每一次执行完立刻 commit，如果报错说明列已存在，立刻 rollback，不影响下一个表的补列
-    alter_queries = [
-        "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE period_bonus ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE redemptions ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE exam_rewards ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE special_events ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE extra_points ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE config_tasks ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE config_shop ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE config_exam ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE config_exam_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE config_thresholds ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE config_bonus_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE config_exam_multihit ADD COLUMN owner_id TEXT DEFAULT '晴'",
-        "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'"
-    ]
-    for q in alter_queries:
-        try:
-            db.execute(q); db.commit()
-        except Exception:
-            if not db.is_cloud: db.conn.rollback() # SQLite 必须手动回滚，PG 有 autocommit 可以直接忽略
+    # 2. 老数据兼容补列
+    if db.is_cloud:
+        do_block = """
+        DO $$
+        DECLARE tbl text;
+        BEGIN
+            FOREACH tbl IN ARRAY ARRAY['daily_records', 'period_bonus', 'redemptions', 'exam_rewards', 'special_events', 'extra_points', 'config_tasks', 'config_shop', 'config_exam', 'config_exam_rules', 'config_thresholds', 'config_bonus_rules', 'config_exam_multihit']
+            LOOP
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name=tbl AND column_name='owner_id') THEN
+                    EXECUTE 'ALTER TABLE ' || quote_ident(tbl) || ' ADD COLUMN owner_id TEXT DEFAULT ''晴''';
+                END IF;
+            END LOOP;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='role') THEN
+                ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='daily_records' AND column_name='basic_thr') THEN
+                ALTER TABLE daily_records ADD COLUMN basic_thr REAL;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='daily_records' AND column_name='full_thr') THEN
+                ALTER TABLE daily_records ADD COLUMN full_thr REAL;
+            END IF;
+        END $$;
+        """
+        try: db.execute(do_block)
+        except: pass
+        db.commit()
+    else:
+        alter_queries = [
+            "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE daily_records ADD COLUMN basic_thr REAL",
+            "ALTER TABLE daily_records ADD COLUMN full_thr REAL",
+            "ALTER TABLE period_bonus ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE redemptions ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE exam_rewards ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE special_events ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE extra_points ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_tasks ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_shop ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_thresholds ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_bonus_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_multihit ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'"
+        ]
+        for q in alter_queries:
+            try: db.execute(q)
+            except: pass
+        db.commit()
     
-    # 3. 初始化超级管理员“晴”
+    # 3. 初始化超级管理员
     if not db.execute("SELECT * FROM users WHERE username='晴'").fetchone():
         db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')", ("晴", hash_pwd("123456")))
         if not db.execute("SELECT * FROM config_tasks WHERE owner_id='晴'").fetchone():
             init_old_admin_data(db)
     else:
         db.execute("UPDATE users SET role='admin' WHERE username='晴'")
-        db.commit()
+    db.commit()
 
 def init_old_admin_data(db):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
@@ -118,10 +146,8 @@ def init_old_admin_data(db):
     db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", ("晴", json.dumps(DEFAULT_BONUS_RULES)))
     db.commit()
 
-# 获取所有用户及其角色字典列表
 def get_all_users(db): return [{"username": r["username"], "role": r["role"]} for r in db.execute("SELECT username, role FROM users").fetchall()]
 
-# ================= 计算与读取逻辑 =================
 def get_thresholds(db, oid):
     rows = db.execute("SELECT * FROM config_thresholds WHERE owner_id=?", (oid,)).fetchall()
     return {r["weekday"]: {"basic": r["basic"], "full": r["full"]} for r in rows}
@@ -138,41 +164,112 @@ def get_exam_config(db, oid):
     return subjects, json.loads(rule_row["config_json"]) if rule_row else DEFAULT_EXAM_RULES
 def get_exam_multihit(db, oid): return [{"hit_count": r["hit_count"], "points": r["points"]} for r in db.execute("SELECT * FROM config_exam_multihit WHERE owner_id=? ORDER BY hit_count ASC", (oid,)).fetchall()]
 
-def compute_bonus_for_day(day: date, lookup: dict, thresholds: dict, bonus_rules: dict) -> tuple[float, dict]:
+# 【核心】计算当日 Bonus，完全采用历史记录里的阈值快照
+def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict) -> tuple[float, dict]:
     key = day.isoformat(); rec = lookup.get(key)
     if rec is None: return 0.0, {}
-    base = float(rec["base_score"]); wd = day.weekday(); thr = thresholds.get(wd, {"basic": 0, "full": 0})
+    base = float(rec["base_score"]); wd = day.weekday()
+    
+    # 使用该日期的快照阈值，如果老数据没有，兜底为0
+    basic_thr = rec.get("basic_thr") or 0
+    full_thr = rec.get("full_thr") or 0
+    
     if wd <= 4:
-        if base < thr["basic"]: return 0.0, {"tier": "none"}
+        if base < basic_thr: return 0.0, {"tier": "none"}
         streak_days = []; cur = day
-        if wd == 3: streak = 1; all_full = base >= thr["full"]
+        if wd == 3: streak = 1; all_full = base >= full_thr
         else:
             while cur.weekday() <= 4:
                 if cur.weekday() == 3: cur -= timedelta(days=1); continue
                 r = lookup.get(cur.isoformat())
                 if r is None: break
-                cur_thr = thresholds.get(cur.weekday(), {"basic": 0, "full": 0})
-                if float(r["base_score"]) >= cur_thr["basic"]: streak_days.append(cur); cur -= timedelta(days=1)
+                cur_basic = r.get("basic_thr") or 0
+                if float(r["base_score"]) >= cur_basic: streak_days.append(cur); cur -= timedelta(days=1)
                 else: break
             streak = len(streak_days)
-            all_full = all(float(lookup[x.isoformat()]["base_score"]) >= thresholds.get(x.weekday(), {"full": 999})["full"] for x in streak_days)
+            all_full = all(float(lookup[x.isoformat()]["base_score"]) >= (lookup[x.isoformat()].get("full_thr") or 999) for x in streak_days)
+        
         rule = bonus_rules.get("weekday", DEFAULT_BONUS_RULES["weekday"])
         if streak >= 4: tier = "streak4"; bonus = rule[tier]["full_points"] if all_full else rule[tier]["points"]
         elif streak >= 2: tier = "streak2"; bonus = rule[tier]["full_points"] if all_full else rule[tier]["points"]
-        else: tier = "single"; bonus = rule[tier]["full_points"] if base >= thr["full"] else rule[tier]["points"]
+        else: tier = "single"; bonus = rule[tier]["full_points"] if base >= full_thr else rule[tier]["points"]
         return float(bonus), {"tier": tier, "streak": streak}
-    if base < thr["basic"]: return 0.0, {"tier": "none"}
-    rule = bonus_rules.get("weekend", DEFAULT_BONUS_RULES["weekend"])["single"]; bonus = rule["full_points"] if base >= thr["full"] else rule["points"]
+    
+    if base < basic_thr: return 0.0, {"tier": "none"}
+    rule = bonus_rules.get("weekend", DEFAULT_BONUS_RULES["weekend"])["single"]; bonus = rule["full_points"] if base >= full_thr else rule["points"]
     return float(bonus), {"tier": "weekend_single"}
 
+# 重算历史（一般只在撤销打卡时调用）
 def recalc_all_bonus(db, oid):
-    thresholds = get_thresholds(db, oid); bonus_rules = get_bonus_rules(db, oid)
-    rows = db.execute("SELECT day, base_score FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
-    lookup = {r["day"]: {"base_score": r["base_score"]} for r in rows}
+    bonus_rules = get_bonus_rules(db, oid)
+    rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
+    lookup = {r["day"]: {"base_score": r["base_score"], "basic_thr": r["basic_thr"], "full_thr": r["full_thr"]} for r in rows}
     for day_str in sorted(lookup):
         d = date.fromisoformat(day_str)
-        bonus, detail = compute_bonus_for_day(d, lookup, thresholds, bonus_rules)
+        bonus, detail = compute_bonus_for_day(d, lookup, bonus_rules)
         db.execute("UPDATE daily_records SET bonus_score=?, bonus_detail=?, total_score=? WHERE day=? AND owner_id=?", (bonus, json.dumps(detail), lookup[day_str]["base_score"] + bonus, day_str, oid))
+    db.commit()
+
+# 长期奖励结算，完全使用历史打卡里冻结的阈值进行判断
+def settle_longterm_bonus(db, oid):
+    bonus_rules = get_bonus_rules(db, oid)
+    rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
+    scores = {r["day"]: r for r in rows}
+    
+    # 重算前清空（因为如果撤销了打卡，当周可能就不完美了）
+    db.execute("DELETE FROM period_bonus WHERE owner_id=?", (oid,))
+    if not scores: 
+        db.commit(); return
+
+    # --- 周结算 ---
+    weeks = {}
+    for ds in scores:
+        d = date.fromisoformat(ds); y, w, _ = d.isocalendar()
+        weeks.setdefault(f"{y}-W{w:02d}", []).append(d)
+    for wk, dlist in weeks.items():
+        monday = min(dlist) - timedelta(days=min(dlist).weekday())
+        full_week = [monday + timedelta(days=i) for i in range(7)]
+        if not all(x.isoformat() in scores for x in full_week): continue
+        
+        basic_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("basic_thr") or 999) for x in full_week)
+        full_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("full_thr") or 999) for x in full_week)
+        
+        target_kind, target_pts = None, 0.0
+        if full_ok:
+            target_kind = "完美一周"; target_pts = bonus_rules["longterm"]["week_full"]
+        elif basic_ok:
+            target_kind = "整周达标"; target_pts = bonus_rules["longterm"]["week_basic"]
+        
+        if target_kind:
+            db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"W:{wk}", oid, target_kind, target_pts, bj_now().isoformat()))
+    
+    # --- 月结算 ---
+    months = {}
+    for ds in scores:
+        d = date.fromisoformat(ds); y, m = d.year, d.month
+        months.setdefault(f"{y}-{m:02d}", []).append(d)
+    for mk, dlist in months.items():
+        y, m = int(mk.split("-")[0]), int(mk.split("-")[1])
+        first = date(y, m, 1)
+        nxt = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+        alldays = []
+        cur = first
+        while cur < nxt:
+            alldays.append(cur)
+            cur += timedelta(days=1)
+        if not all(x.isoformat() in scores for x in alldays): continue
+        
+        basic_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("basic_thr") or 999) for x in alldays)
+        full_ok = all(scores[x.isoformat()]["base_score"] >= (scores[x.isoformat()].get("full_thr") or 999) for x in alldays)
+        
+        target_kind, target_pts = None, 0.0
+        if full_ok:
+            target_kind = "完美一月"; target_pts = bonus_rules["longterm"]["month_full"]
+        elif basic_ok:
+            target_kind = "整月达标"; target_pts = bonus_rules["longterm"]["month_basic"]
+            
+        if target_kind:
+            db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"M:{mk}", oid, target_kind, target_pts, bj_now().isoformat()))
     db.commit()
 
 def get_balance(db, oid) -> dict:
@@ -215,8 +312,20 @@ def save_day(db, day: date, done_ids: list[str], oid: str):
     tasks = get_tasks(db, day.weekday(), oid)
     base = sum(t["points"] for t in tasks if t["id"] in set(done_ids))
     ts = bj_now().isoformat(timespec="seconds")
-    db.execute("INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at) VALUES (?, ?, ?, ?, 0, '{}', ?, ?) ON CONFLICT(day, owner_id) DO UPDATE SET done_tasks=excluded.done_tasks, base_score=excluded.base_score, updated_at=excluded.updated_at", (day.isoformat(), oid, json.dumps(sorted(done_ids)), base, base, ts))
-    db.commit(); recalc_all_bonus(db, oid)
+    
+    # 【核心】抓取当天的标准作为快照保存
+    thresholds = get_thresholds(db, oid)
+    thr = thresholds.get(day.weekday(), {"basic": 0, "full": 0})
+    
+    db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (day.isoformat(), oid))
+    db.execute("""
+        INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) 
+        VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)
+    """, (day.isoformat(), oid, json.dumps(sorted(done_ids)), base, base, ts, thr["basic"], thr["full"]))
+    db.commit()
+    
+    recalc_all_bonus(db, oid)
+    settle_longterm_bonus(db, oid)
 
 # ================= 页面渲染 =================
 def login_page(db):
@@ -264,7 +373,7 @@ def main():
     with st.sidebar:
         st.title("学习打卡")
         if current_role == "admin":
-            view_as = st.selectbox("管理员特权：切换账号", user_names, index=user_names.index(current_user))
+            view_as = st.selectbox("管理员特权：切换账号", user_names, index=user_names.index(current_user) if current_user in user_names else 0)
         else:
             view_as = current_user
         
@@ -310,7 +419,6 @@ def main():
     tabs = ["打卡", "偶发", "历史", "商城", "兑换", "考试", "事件", "系统设置"]
     tab_objs = st.tabs(tabs)
 
-    # 1. 打卡
     with tab_objs[0]:
         tasks = get_tasks(db, today.weekday(), view_as)
         if not tasks:
@@ -341,18 +449,17 @@ def main():
                 st.success("今日已完成打卡，记录已锁定。")
                 if st.button("撤销今日打卡（重新填写）", type="secondary", use_container_width=True):
                     db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), view_as))
-                    db.commit(); recalc_all_bonus(db, view_as); st.rerun()
+                    db.commit(); recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as); st.rerun()
             else:
                 base_now = sum(t["points"] for t in tasks if t["id"] in set(selected_ids))
-                lookup = {r["day"]: {"base_score": r["base_score"]} for r in db.execute("SELECT day, base_score FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
-                lookup[today.isoformat()] = {"base_score": base_now}
-                bonus, detail = compute_bonus_for_day(today, lookup, thresholds, get_bonus_rules(db, view_as))
+                lookup = {r["day"]: {"base_score": r["base_score"], "basic_thr": r.get("basic_thr"), "full_thr": r.get("full_thr")} for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
+                lookup[today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
+                bonus, detail = compute_bonus_for_day(today, lookup, get_bonus_rules(db, view_as))
                 c1.metric("基础分", f"{base_now:.1f}"); c2.metric("Bonus", f"{bonus:.1f}"); c3.metric("预计总分", f"{base_now + bonus:.1f}")
                 if detail.get("tier") in TIER_CN: st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
                 if st.button("保存今日打卡", type="primary", use_container_width=True):
                     save_day(db, today, selected_ids, view_as); st.success("已保存！"); st.rerun()
 
-    # 2. 偶发
     with tab_objs[1]:
         st.subheader("偶发事件加/扣分")
         with st.form("extra_point_form"):
@@ -371,7 +478,6 @@ def main():
                 db.execute("DELETE FROM extra_points WHERE owner_id=?", (view_as,)); db.commit(); st.rerun()
         else: st.caption("暂无记录")
 
-    # 3. 历史
     with tab_objs[2]:
         st.subheader("历史记录")
         days = [r["day"] for r in db.execute("SELECT day FROM daily_records WHERE owner_id=? ORDER BY day DESC", (view_as,)).fetchall()]
@@ -381,9 +487,9 @@ def main():
             st.write(f"**总分: {row['total_score']:.1f}** (基础 {row['base_score']:.1f} + Bonus {row['bonus_score']:.1f})")
             done = json.loads(row["done_tasks"])
             st.write("完成项：", ", ".join([t["name"] for t in get_tasks(db, date.fromisoformat(sel).weekday(), view_as) if t["id"] in done]) or "无")
+            st.caption(f"当时判定标准：基本 {row.get('basic_thr')} 分 / 满分 {row.get('full_thr')} 分")
         else: st.info("暂无记录")
 
-    # 4. 商城
     with tab_objs[3]:
         st.subheader("商城")
         shop_items = get_shop(db, view_as)
@@ -398,14 +504,12 @@ def main():
                     db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, bj_now().isoformat()))
                     db.commit(); st.success("兑换成功！"); st.rerun()
 
-    # 5. 兑换
     with tab_objs[4]:
         st.subheader("兑换历史")
         rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
         if rows: st.dataframe([{"时间": r["ts"], "奖励": r["item"], "消耗": r["cost"]} for r in rows], use_container_width=True)
         else: st.info("暂无")
 
-    # 6. 考试
     with tab_objs[5]:
         st.subheader("考试专项")
         exam_config, _ = get_exam_config(db, view_as)
@@ -437,7 +541,6 @@ def main():
                 db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, bj_now().isoformat()))
                 db.commit(); st.success("已保存！"); st.rerun()
 
-    # 7. 事件
     with tab_objs[6]:
         st.subheader("特殊事件")
         fired = db.execute("SELECT * FROM special_events WHERE day=? AND owner_id=?", (today.isoformat(), view_as)).fetchone()
@@ -449,7 +552,6 @@ def main():
                 db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (today.isoformat(), view_as, pts, "积分暴击", bj_now().isoformat()))
                 db.commit(); st.balloons(); st.success(f"获得 {pts} 积分！"); st.rerun()
 
-    # 8. 系统设置
     with tab_objs[7]:
         st.subheader("系统设置")
         if current_role == "admin":
@@ -504,7 +606,8 @@ def main():
             db.commit(); st.success("多科奖励已更新！"); st.rerun()
 
         st.divider()
-        st.markdown("### 5. 修改阈值与 Bonus 规则")
+        st.markdown("### 5. 修改阈值与 Bonus 规则 (老数据不受影响)")
+        st.info("💡 提示：修改新规则后，只会对**未来**的打卡生效。已经打过的卡依然按当时的分数标准结算。")
         thresholds = get_thresholds(db, view_as); bonus_rules = get_bonus_rules(db, view_as)
         with st.form(f"bonus_form_{view_as}"):
             t_cols = st.columns(7); t_inputs = {}
@@ -530,16 +633,15 @@ def main():
                 lt_mb = st.number_input("整月达标", value=float(bonus_rules["longterm"]["month_basic"]), step=0.5, key=f"b11_{view_as}")
                 lt_mf = st.number_input("完美一月", value=float(bonus_rules["longterm"]["month_full"]), step=0.5, key=f"b12_{view_as}")
 
-            if st.form_submit_button("保存并重算历史", type="primary", use_container_width=True):
+            if st.form_submit_button("保存新规则 (即刻生效)", type="primary", use_container_width=True):
                 for i in range(7): 
-                    db.execute("UPDATE config_thresholds SET basic=?, \"full\"=? WHERE weekday=? AND owner_id=?", (t_inputs[i]["basic"], t_inputs[i]["full"], i, view_as))
-                    if db.execute("SELECT COUNT(*) as c FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as)).fetchone()["c"] == 0:
-                        db.execute("INSERT INTO config_thresholds (weekday, owner_id, basic, \"full\") VALUES (?,?,?,?)", (i, view_as, t_inputs[i]["basic"], t_inputs[i]["full"]))
+                    db.execute("DELETE FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as))
+                    db.execute("INSERT INTO config_thresholds (weekday, owner_id, basic, \"full\") VALUES (?,?,?,?)", (i, view_as, t_inputs[i]["basic"], t_inputs[i]["full"]))
                 new_bonus = {"weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}}, "weekend": {"single": {"points": we_single, "full_points": we_single_full}}, "longterm": {"week_basic": lt_wb, "week_full": lt_wf, "month_basic": lt_mb, "month_full": lt_mf}}
-                db.execute("UPDATE config_bonus_rules SET rules_json=? WHERE owner_id=?", (json.dumps(new_bonus), view_as))
-                if db.execute("SELECT COUNT(*) as c FROM config_bonus_rules WHERE owner_id=?", (view_as,)).fetchone()["c"] == 0:
-                    db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
-                db.commit(); recalc_all_bonus(db, view_as); st.success("已更新并重算！"); st.rerun()
+                db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
+                db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
+                db.commit(); 
+                st.success("✅ 新标准已启用！未来打卡生效。"); st.rerun()
 
         if current_role == "admin":
             st.divider()
