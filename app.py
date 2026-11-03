@@ -74,31 +74,29 @@ def init_db(db):
         except: pass
     db.commit()
     
-    # 2. 老数据兼容补列
+    # 2. 强行补列（给老数据库追加字段）
     if db.is_cloud:
-        do_block = """
-        DO $$
-        DECLARE tbl text;
-        BEGIN
-            FOREACH tbl IN ARRAY ARRAY['daily_records', 'period_bonus', 'redemptions', 'exam_rewards', 'special_events', 'extra_points', 'config_tasks', 'config_shop', 'config_exam', 'config_exam_rules', 'config_thresholds', 'config_bonus_rules', 'config_exam_multihit']
-            LOOP
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name=tbl AND column_name='owner_id') THEN
-                    EXECUTE 'ALTER TABLE ' || quote_ident(tbl) || ' ADD COLUMN owner_id TEXT DEFAULT ''晴''';
-                END IF;
-            END LOOP;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='role') THEN
-                ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='daily_records' AND column_name='basic_thr') THEN
-                ALTER TABLE daily_records ADD COLUMN basic_thr REAL;
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='daily_records' AND column_name='full_thr') THEN
-                ALTER TABLE daily_records ADD COLUMN full_thr REAL;
-            END IF;
-        END $$;
-        """
-        try: db.execute(do_block)
-        except: pass
+        alter_queries = [
+            "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS basic_thr REAL",
+            "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS full_thr REAL",
+            "ALTER TABLE period_bonus ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE redemptions ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE exam_rewards ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE special_events ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE extra_points ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_tasks ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_shop ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_thresholds ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_bonus_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_multihit ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'"
+        ]
+        for q in alter_queries:
+            try: db.execute(q)
+            except: pass
         db.commit()
     else:
         alter_queries = [
@@ -125,13 +123,18 @@ def init_db(db):
         db.commit()
     
     # 3. 初始化超级管理员
-    if not db.execute("SELECT * FROM users WHERE username='晴'").fetchone():
-        db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')", ("晴", hash_pwd("123456")))
-        if not db.execute("SELECT * FROM config_tasks WHERE owner_id='晴'").fetchone():
-            init_old_admin_data(db)
-    else:
-        db.execute("UPDATE users SET role='admin' WHERE username='晴'")
-    db.commit()
+    try:
+        row = db.execute("SELECT * FROM users WHERE username='晴'").fetchone()
+        if not row:
+            db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')", ("晴", hash_pwd("123456")))
+            if not db.execute("SELECT * FROM config_tasks WHERE owner_id='晴'").fetchone():
+                init_old_admin_data(db)
+        else:
+            db.execute("UPDATE users SET role='admin' WHERE username='晴'")
+        db.commit()
+    except Exception as e:
+        # 捕获异常防止卡死
+        pass
 
 def init_old_admin_data(db):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
@@ -164,13 +167,11 @@ def get_exam_config(db, oid):
     return subjects, json.loads(rule_row["config_json"]) if rule_row else DEFAULT_EXAM_RULES
 def get_exam_multihit(db, oid): return [{"hit_count": r["hit_count"], "points": r["points"]} for r in db.execute("SELECT * FROM config_exam_multihit WHERE owner_id=? ORDER BY hit_count ASC", (oid,)).fetchall()]
 
-# 【核心】计算当日 Bonus，完全采用历史记录里的阈值快照
 def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict) -> tuple[float, dict]:
     key = day.isoformat(); rec = lookup.get(key)
     if rec is None: return 0.0, {}
     base = float(rec["base_score"]); wd = day.weekday()
     
-    # 使用该日期的快照阈值，如果老数据没有，兜底为0
     basic_thr = rec.get("basic_thr") or 0
     full_thr = rec.get("full_thr") or 0
     
@@ -199,24 +200,21 @@ def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict) -> tuple[f
     rule = bonus_rules.get("weekend", DEFAULT_BONUS_RULES["weekend"])["single"]; bonus = rule["full_points"] if base >= full_thr else rule["points"]
     return float(bonus), {"tier": "weekend_single"}
 
-# 重算历史（一般只在撤销打卡时调用）
 def recalc_all_bonus(db, oid):
     bonus_rules = get_bonus_rules(db, oid)
     rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
-    lookup = {r["day"]: {"base_score": r["base_score"], "basic_thr": r["basic_thr"], "full_thr": r["full_thr"]} for r in rows}
+    lookup = {r["day"]: {"base_score": r["base_score"], "basic_thr": r.get("basic_thr"), "full_thr": r.get("full_thr")} for r in rows}
     for day_str in sorted(lookup):
         d = date.fromisoformat(day_str)
         bonus, detail = compute_bonus_for_day(d, lookup, bonus_rules)
         db.execute("UPDATE daily_records SET bonus_score=?, bonus_detail=?, total_score=? WHERE day=? AND owner_id=?", (bonus, json.dumps(detail), lookup[day_str]["base_score"] + bonus, day_str, oid))
     db.commit()
 
-# 长期奖励结算，完全使用历史打卡里冻结的阈值进行判断
 def settle_longterm_bonus(db, oid):
     bonus_rules = get_bonus_rules(db, oid)
     rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
     scores = {r["day"]: r for r in rows}
     
-    # 重算前清空（因为如果撤销了打卡，当周可能就不完美了）
     db.execute("DELETE FROM period_bonus WHERE owner_id=?", (oid,))
     if not scores: 
         db.commit(); return
@@ -313,7 +311,6 @@ def save_day(db, day: date, done_ids: list[str], oid: str):
     base = sum(t["points"] for t in tasks if t["id"] in set(done_ids))
     ts = bj_now().isoformat(timespec="seconds")
     
-    # 【核心】抓取当天的标准作为快照保存
     thresholds = get_thresholds(db, oid)
     thr = thresholds.get(day.weekday(), {"basic": 0, "full": 0})
     
