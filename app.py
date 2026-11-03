@@ -52,7 +52,6 @@ class DBWrapper:
                 if params: cur.execute(query, params)
                 else: cur.execute(query)
                 
-                # 强制在锁内读取结果，返回伪游标，防止多个用户同时读取时游标被覆盖
                 if cur.description:
                     rows = cur.fetchall()
                     class FakeCursor:
@@ -898,7 +897,6 @@ def main():
                                 selected_past_ids.append(t["id"])
                         
                         if st.form_submit_button("使用 1 张补签卡并提交", type="primary"):
-                            # 修复：并发检查余额并立刻扣减
                             curr_cards = db.execute("SELECT makeup_cards FROM users WHERE username=?", (current_user,)).fetchone()["makeup_cards"]
                             if curr_cards > 0:
                                 db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (current_user,))
@@ -906,7 +904,6 @@ def main():
                                 
                                 t_thr = get_thresholds(db, view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
                                 
-                                # 防止已有记录导致主键冲突，先删后插
                                 db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
                                 
                                 db.execute("""
@@ -1075,7 +1072,17 @@ def main():
             exam_config, exam_rules = get_exam_config(db, view_as)
             df_exam_data = []
             for k, v in exam_config.items():
-                df_exam_data.append({"科目": k, "类型": v["type"], "满分": v.get("max_score", 150), "目标": str(v["target"]), "分差": v.get("step", 0), "单档奖励": v["step_points"]})
+                # 如果类型是 grade，满分和分差置空，避免误解
+                max_s = v.get("max_score") if v["type"] == "score" else None
+                step_s = v.get("step") if v["type"] == "score" else None
+                df_exam_data.append({
+                    "科目": k, 
+                    "类型": v["type"], 
+                    "满分": max_s, 
+                    "目标": str(v["target"]), 
+                    "分差": step_s, 
+                    "单档奖励": v["step_points"]
+                })
             df_exam = pd.DataFrame(df_exam_data)
             if df_exam.empty: df_exam = pd.DataFrame(columns=["科目", "类型", "满分", "目标", "分差", "单档奖励"])
 
@@ -1105,6 +1112,7 @@ def main():
                             cfg = {"type": "score", "max_score": float(row["满分"] or 150), "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
                         else:
                             if e_target not in GRADES: st.error(f"科目 {sub} 目标必须在 11 档内"); has_error = True; break
+                            # 等级模式不保存满分和分差
                             cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
                         db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
                 if has_error: db.commit()
