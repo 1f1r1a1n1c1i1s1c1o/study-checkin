@@ -15,7 +15,6 @@ else:
     import sqlite3
 
 # ================= 时间引擎 =================
-# 默认时区列表
 TIMEZONES = {
     "北京时间 (UTC+8)": 8.0,
     "东京时间 (UTC+9)": 9.0,
@@ -24,7 +23,7 @@ TIMEZONES = {
     "巴黎时间 (UTC+1)": 1.0,
     "纽约时间 (UTC-5)": -5.0,
     "洛杉矶时间 (UTC-8)": -8.0,
-    "自定义 (UTC+0)": 0.0 # 用户可自由修改
+    "自定义时区": None
 }
 
 def get_user_now(offset_hours: float) -> datetime:
@@ -34,8 +33,6 @@ def get_user_now(offset_hours: float) -> datetime:
 def get_user_today(offset_hours: float) -> date:
     return get_user_now(offset_hours).date()
 
-# 兼容旧代码的全局变量，但稍后我们会用 user_tz 替代
-BJ_TZ = timezone(timedelta(hours=8))
 DB_PATH = Path(__file__).resolve().parent / "study_points.db"
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
@@ -77,10 +74,8 @@ class DBWrapper:
                 return cur
             else: 
                 return self.conn.execute(query, params)
-        except (psycopg2.OperationalError, sqlite3.OperationalError):
-            st.cache_resource.clear()
-            st.error("网络波动，数据库连接已断开，请刷新页面重试。")
-            st.stop()
+        except (psycopg2.OperationalError, sqlite3.OperationalError) as e:
+            raise RuntimeError(f"数据库网络波动，请刷新页面重试。({str(e)})")
     def commit(self): self.conn.commit()
 
 @st.cache_resource(show_spinner=False)
@@ -101,7 +96,7 @@ def init_db(db):
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'")
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS webhook_url TEXT")
             db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS makeup_cards INTEGER DEFAULT 0")
-            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone_offset REAL DEFAULT 8.0") # 新增：时区
+            db.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone_offset REAL DEFAULT 8.0")
         else:
             try: db.execute("ALTER TABLE users ADD COLUMN security_question TEXT")
             except: pass
@@ -200,22 +195,13 @@ def init_db(db):
         global_badge_count = db.execute("SELECT COUNT(*) as c FROM config_badges WHERE owner_id='system'").fetchone()["c"]
         if global_badge_count == 0:
             db.execute("DELETE FROM config_badges")
-            default_badges = [
-                ("破壳而出", "days", 1),
-                ("持之以恒", "days", 7),
-                ("习惯成自然", "days", 30),
-                ("积分大亨", "points", 100),
-                ("完美主义", "perfect", 1),
-                ("考神附体", "exam_hits", 4)
-            ]
+            default_badges = [("破壳而出", "days", 1), ("持之以恒", "days", 7), ("习惯成自然", "days", 30), ("积分大亨", "points", 100), ("完美主义", "perfect", 1), ("考神附体", "exam_hits", 4)]
             for b in default_badges:
                 prompt = f"Minimalist flat vector icon for '{b[0]}', clean simple design, ui app icon, no text, white background, not exaggerated"
-                encoded_prompt = urllib.parse.quote(prompt)
-                icon_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=256&height=256&nologo=true&seed=42"
+                icon_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=256&height=256&nologo=true&seed=42"
                 db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (b[0], b[1], b[2], icon_url))
         db.commit()
-    except Exception:
-        pass
+    except Exception: pass
 
 def init_old_admin_data(db):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
@@ -232,7 +218,6 @@ def init_old_admin_data(db):
 
 def get_all_users(db): return [{"username": r["username"], "role": r["role"]} for r in db.execute("SELECT username, role FROM users").fetchall()]
 
-# ================= 读取缓存逻辑 =================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_thresholds(oid):
     db = get_db()
@@ -259,8 +244,7 @@ def get_tasks(weekday, oid):
 def get_shop(oid):
     db = get_db()
     items = [(r["name"], r["cost"]) for r in db.execute("SELECT * FROM config_shop WHERE owner_id=?", (oid,)).fetchall()]
-    if not any(i[0] == "补签卡" for i in items):
-        items.insert(0, ("补签卡", 25))
+    if not any(i[0] == "补签卡" for i in items): items.insert(0, ("补签卡", 25))
     return items
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -289,13 +273,7 @@ def get_balance(oid) -> dict:
     special = db.execute("SELECT COALESCE(SUM(points),0) as s FROM special_events WHERE owner_id=?", (oid,)).fetchone()["s"]
     spent = db.execute("SELECT COALESCE(SUM(cost),0) as s FROM redemptions WHERE owner_id=?", (oid,)).fetchone()["s"]
     extra = db.execute("SELECT COALESCE(SUM(points),0) as s FROM extra_points WHERE owner_id=?", (oid,)).fetchone()["s"]
-    
-    return {
-        "daily": round(float(daily), 2), "period": round(float(period), 2), 
-        "exam": round(float(exam), 2), "special": round(float(special), 2), 
-        "spent": round(float(spent), 2), "extra": round(float(extra), 2), 
-        "balance": round(float(daily) + float(period) + float(exam) + float(special) + float(extra) - float(spent), 2)
-    }
+    return {"daily": round(float(daily), 2), "period": round(float(period), 2), "exam": round(float(exam), 2), "special": round(float(special), 2), "spent": round(float(spent), 2), "extra": round(float(extra), 2), "balance": round(float(daily) + float(period) + float(exam) + float(special) + float(extra) - float(spent), 2)}
 
 @st.cache_data(ttl=10, show_spinner=False)
 def get_user_badges(oid):
@@ -305,30 +283,21 @@ def get_user_badges(oid):
     earned = []
     try:
         days_count = db.execute("SELECT COUNT(*) as c FROM daily_records WHERE owner_id=?", (oid,)).fetchone()["c"]
-        bal = get_balance(oid)
-        total_earned = bal['balance'] + bal['spent']
+        bal = get_balance(oid); total_earned = bal['balance'] + bal['spent']
         perfect_count = db.execute("SELECT COUNT(*) as c FROM period_bonus WHERE owner_id=? AND kind LIKE ?", (oid, '%完美%')).fetchone()["c"]
-        
         max_exam_hits = 0
-        exam_rewards = db.execute("SELECT detail FROM exam_rewards WHERE owner_id=?", (oid,)).fetchall()
-        for er in exam_rewards:
+        for er in db.execute("SELECT detail FROM exam_rewards WHERE owner_id=?", (oid,)).fetchall():
             if er["detail"]:
                 match = re.search(r'达成 (\d+) 门', er["detail"])
                 if match:
                     hits = int(match.group(1))
                     if hits > max_exam_hits: max_exam_hits = hits
     except Exception: return []
-
     for cfg in configs:
         try:
-            cond_type = cfg["cond_type"]
-            cond_val = float(cfg["cond_val"])
-            is_hit = False
-            if cond_type == 'days' and days_count >= cond_val: is_hit = True
-            elif cond_type == 'points' and total_earned >= cond_val: is_hit = True
-            elif cond_type == 'perfect' and perfect_count >= cond_val: is_hit = True
-            elif cond_type == 'exam_hits' and max_exam_hits >= cond_val: is_hit = True
-            if is_hit: earned.append({"name": html.escape(cfg["name"]), "icon": cfg["icon_url"]})
+            cond_type = cfg["cond_type"]; cond_val = float(cfg["cond_val"])
+            if (cond_type == 'days' and days_count >= cond_val) or (cond_type == 'points' and total_earned >= cond_val) or (cond_type == 'perfect' and perfect_count >= cond_val) or (cond_type == 'exam_hits' and max_exam_hits >= cond_val):
+                earned.append({"name": html.escape(cfg["name"]), "icon": cfg["icon_url"]})
         except Exception: continue
     return earned
 
@@ -337,10 +306,7 @@ def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict) -> tuple[f
     if rec is None: return 0.0, {}
     try: base = float(rec["base_score"])
     except: base = 0.0
-    wd = day.weekday()
-    basic_thr = float(rec.get("basic_thr") or 0)
-    full_thr = float(rec.get("full_thr") or 0)
-    
+    wd = day.weekday(); basic_thr = float(rec.get("basic_thr") or 0); full_thr = float(rec.get("full_thr") or 0)
     if wd <= 4:
         if base < basic_thr: return 0.0, {"tier": "none"}
         streak_days = []; cur = day
@@ -370,16 +336,14 @@ def recalc_all_bonus(db, oid):
         rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
         lookup = {r["day"]: {"base_score": r["base_score"], "basic_thr": r.get("basic_thr"), "full_thr": r.get("full_thr")} for r in rows}
         for day_str in sorted(lookup):
-            d = date.fromisoformat(day_str)
-            bonus, detail = compute_bonus_for_day(d, lookup, bonus_rules)
+            d = date.fromisoformat(day_str); bonus, detail = compute_bonus_for_day(d, lookup, bonus_rules)
             db.execute("UPDATE daily_records SET bonus_score=?, bonus_detail=?, total_score=? WHERE day=? AND owner_id=?", (bonus, json.dumps(detail), float(lookup[day_str]["base_score"]) + bonus, day_str, oid))
         db.commit()
     except Exception: pass
 
-def settle_longterm_bonus(db, oid):
+def settle_longterm_bonus(db, oid, ts):
     try:
-        bonus_rules = get_bonus_rules(oid)
-        lt_rules = bonus_rules["longterm"]
+        bonus_rules = get_bonus_rules(oid); lt_rules = bonus_rules["longterm"]
         rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
         scores = {r["day"]: r for r in rows}
         db.execute("DELETE FROM period_bonus WHERE owner_id=?", (oid,))
@@ -389,92 +353,62 @@ def settle_longterm_bonus(db, oid):
         for ds in scores:
             d = date.fromisoformat(ds); y, w, _ = d.isocalendar()
             weeks.setdefault(f"{y}-W{w:02d}", []).append(d)
-            
         week_status = {}
         for wk, dlist in weeks.items():
-            monday = min(dlist) - timedelta(days=min(dlist).weekday())
-            full_week = [monday + timedelta(days=i) for i in range(7)]
-            if not all(x.isoformat() in scores for x in full_week): 
-                week_status[wk] = {'is_perfect': False, 'is_basic': False}
-                continue
-                
+            monday = min(dlist) - timedelta(days=min(dlist).weekday()); full_week = [monday + timedelta(days=i) for i in range(7)]
+            if not all(x.isoformat() in scores for x in full_week): week_status[wk] = {'is_perfect': False, 'is_basic': False}; continue
             miss_basic = 0; miss_full = 0
             for x in full_week:
                 day_data = scores[x.isoformat()]
                 if float(day_data["base_score"]) < float(day_data.get("basic_thr") or 999): miss_basic += 1
                 elif float(day_data["base_score"]) < float(day_data.get("full_thr") or 999): miss_full += 1
-                
-            target_kind, target_pts = None, 0.0
-            is_perfect = False; is_basic = False
-
+            target_kind, target_pts = None, 0.0; is_perfect = False; is_basic = False
             if miss_basic == 0:
                 is_basic = True
                 if miss_full == 0: is_perfect = True; target_kind = "完美一周(全满分)"; target_pts = lt_rules["week_full"]
                 elif miss_full == 1: is_perfect = True; target_kind = "完美一周(弹性1天)"; target_pts = max(0, lt_rules["week_full"] - lt_rules.get("week_flex_perfect_deduct", 1.0))
                 else: target_kind = "整周达标"; target_pts = lt_rules["week_basic"]
-            elif miss_basic == 1:
-                is_basic = True
-                target_kind = "整周达标(弹性1天)"; target_pts = max(0, lt_rules["week_basic"] - lt_rules.get("week_flex_basic_deduct", 0.5))
-                
+            elif miss_basic == 1: is_basic = True; target_kind = "整周达标(弹性1天)"; target_pts = max(0, lt_rules["week_basic"] - lt_rules.get("week_flex_basic_deduct", 0.5))
             week_status[wk] = {'is_perfect': is_perfect, 'is_basic': is_basic}
-            if target_kind:
-                db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"W:{wk}", oid, target_kind, target_pts, get_user_now(8.0).isoformat()))
+            if target_kind: db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"W:{wk}", oid, target_kind, target_pts, ts))
 
         months = {}
         for ds in scores:
             d = date.fromisoformat(ds); y, m = d.year, d.month
             months.setdefault(f"{y}-{m:02d}", []).append(d)
-            
         for mk, dlist in months.items():
             y, m = int(mk.split("-")[0]), int(mk.split("-")[1])
             first = date(y, m, 1); nxt = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
             alldays = []
             cur = first
-            while cur < nxt:
-                alldays.append(cur); cur += timedelta(days=1)
+            while cur < nxt: alldays.append(cur); cur += timedelta(days=1)
             if not all(x.isoformat() in scores for x in alldays): continue
-            
             month_is_perfect = True; month_is_basic = True
             for day_obj in alldays:
-                ds = day_obj.isoformat(); day_data = scores[ds]
-                dy, dw, _ = day_obj.isocalendar()
-                wk_key = f"{dy}-W{dw:02d}"
+                ds = day_obj.isoformat(); day_data = scores[ds]; dy, dw, _ = day_obj.isocalendar(); wk_key = f"{dy}-W{dw:02d}"
                 w_stat = week_status.get(wk_key, {'is_perfect': False, 'is_basic': False})
                 day_full = float(day_data["base_score"]) >= float(day_data.get("full_thr") or 999)
                 day_basic = float(day_data["base_score"]) >= float(day_data.get("basic_thr") or 999)
                 if not day_full and not w_stat['is_perfect']: month_is_perfect = False
                 if not day_basic and not w_stat['is_basic']: month_is_basic = False
-
             target_kind, target_pts = None, 0.0
             if month_is_perfect: target_kind = "完美一月"; target_pts = lt_rules["month_full"]
             elif month_is_basic: target_kind = "整月达标"; target_pts = lt_rules["month_basic"]
-                
-            if target_kind:
-                db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"M:{mk}", oid, target_kind, target_pts, get_user_now(8.0).isoformat()))
+            if target_kind: db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"M:{mk}", oid, target_kind, target_pts, ts))
         db.commit()
     except Exception: pass
 
 def save_day(db, day: date, done_ids: list[str], oid: str, ts: str):
     tasks = get_tasks(day.weekday(), oid)
     base = sum(t["points"] for t in tasks if t["id"] in set(done_ids))
-    thresholds = get_thresholds(oid)
-    thr = thresholds.get(day.weekday(), {"basic": 0, "full": 0})
+    thresholds = get_thresholds(oid); thr = thresholds.get(day.weekday(), {"basic": 0, "full": 0})
     db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (day.isoformat(), oid))
-    db.execute("""
-        INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) 
-        VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)
-    """, (day.isoformat(), oid, json.dumps(sorted(done_ids)), base, base, ts, thr["basic"], thr["full"]))
-    db.commit()
-    recalc_all_bonus(db, oid)
-    settle_longterm_bonus(db, oid)
-    st.cache_data.clear()
+    db.execute("INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)", (day.isoformat(), oid, json.dumps(sorted(done_ids)), base, base, ts, thr["basic"], thr["full"]))
+    db.commit(); recalc_all_bonus(db, oid); settle_longterm_bonus(db, oid, ts); st.cache_data.clear()
 
 def calc_exam_bonus(scores: dict, ranks: dict, oid: str) -> tuple[float, list[str], int]:
-    try:
-        exam_config, exam_rules = get_exam_config(oid); multihit_rules = get_exam_multihit(oid)
-    except Exception:
-        return 0.0, ["数据配置异常，无法结算"], 0
-        
+    try: exam_config, exam_rules = get_exam_config(oid); multihit_rules = get_exam_multihit(oid)
+    except Exception: return 0.0, ["数据配置异常，无法结算"], 0
     total = 0.0; lines = []; hit_count = 0
     for subject, cfg in exam_config.items():
         actual = scores.get(subject)
@@ -482,52 +416,46 @@ def calc_exam_bonus(scores: dict, ranks: dict, oid: str) -> tuple[float, list[st
         if cfg.get("type") == "score":
             hit = actual >= cfg.get("target", 0)
             if hit: total += exam_rules.get("hit_points", 1); hit_count += 1; lines.append(f"达成 {subject} -> +{exam_rules.get('hit_points', 1)}")
-            step = cfg.get("step", 0)
-            tiers = int((actual - cfg.get("target", 0)) // step) if step > 0 and actual > cfg.get("target", 0) else 0
-            if tiers > 0: 
-                gain = tiers * cfg.get("step_points", 0); total += gain; lines.append(f"  {subject} 超目标 {tiers} 档 -> +{gain}")
+            step = cfg.get("step", 0); tiers = int((actual - cfg.get("target", 0)) // step) if step > 0 and actual > cfg.get("target", 0) else 0
+            if tiers > 0: gain = tiers * cfg.get("step_points", 0); total += gain; lines.append(f"  {subject} 超目标 {tiers} 档 -> +{gain}")
         else:
             if cfg.get("target") not in GRADES or actual not in GRADES: continue
             gap = GRADES.index(cfg["target"]) - GRADES.index(actual); hit = gap >= 0
             if hit: total += exam_rules.get("hit_points", 1); hit_count += 1; lines.append(f"达成 {subject} -> +{exam_rules.get('hit_points', 1)}")
-            if gap > 0: 
-                gain = gap * cfg.get("step_points", 0); total += gain; lines.append(f"  {subject} 升 {gap} 档 -> +{gain}")
-                
+            if gap > 0: gain = gap * cfg.get("step_points", 0); total += gain; lines.append(f"  {subject} 升 {gap} 档 -> +{gain}")
     for mh in sorted(multihit_rules, key=lambda x: x["hit_count"], reverse=True):
         if hit_count >= mh["hit_count"]: total += mh["points"]; lines.append(f"达成 {mh['hit_count']} 门及以上 -> +{mh['points']}"); break 
-        
     for subject in ["语文", "数学", "英语"]:
         pct = ranks.get(subject)
         if pct is not None and 0 <= pct < 100 and pct <= exam_rules.get("rank_top_percent", 75):
             total += exam_rules.get("rank_base_points", 1); lines.append(f"{subject} 前{pct:.0f}% -> +{exam_rules.get('rank_base_points', 1)}")
-            pct_step = exam_rules.get("rank_step_percent", 5)
-            extra = int((exam_rules.get("rank_top_percent", 75) - pct) // pct_step) if pct_step > 0 else 0
-            if extra > 0: 
-                gain = extra * exam_rules.get("rank_step_points", 1.5); total += gain; lines.append(f"  再进{extra}档 -> +{gain}")
-                
+            pct_step = exam_rules.get("rank_step_percent", 5); extra = int((exam_rules.get("rank_top_percent", 75) - pct) // pct_step) if pct_step > 0 else 0
+            if extra > 0: gain = extra * exam_rules.get("rank_step_points", 1.5); total += gain; lines.append(f"  再进{extra}档 -> +{gain}")
     return round(total, 2), lines, hit_count
 
 def render_timer():
     timer_html = """
     <style>
-        .timer-container { font-family: sans-serif; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 10px; }
-        .timer-display { font-size: 40px; font-weight: bold; margin: 10px 0; color: #2c3e50; }
-        .btn-group { display: flex; justify-content: center; gap: 10px; margin-top: 10px; flex-wrap: wrap;}
-        button { padding: 8px 15px; font-size: 14px; cursor: pointer; border: none; border-radius: 5px; background: #007bff; color: white; transition: 0.2s; }
+        body { margin: 0; padding: 0; overflow: hidden; }
+        .timer-container { font-family: sans-serif; text-align: center; padding: 10px 5px; background: #f8f9fa; border-radius: 10px; }
+        .timer-display { font-size: 36px; font-weight: bold; margin: 5px 0 15px 0; color: #2c3e50; }
+        .row { display: flex; justify-content: center; align-items: center; gap: 8px; margin-bottom: 15px; font-size: 14px; }
+        .row select, .row input { padding: 5px; border-radius: 5px; border: 1px solid #ccc; }
+        .row input { width: 50px; text-align: center; }
+        .btn-group { display: flex; justify-content: center; gap: 8px; }
+        button { flex: 1; padding: 8px 0; font-size: 14px; cursor: pointer; border: none; border-radius: 5px; background: #007bff; color: white; transition: 0.2s; }
         button:hover { background: #0056b3; }
         .btn-stop { background: #dc3545; } .btn-stop:hover { background: #c82333; }
         .btn-reset { background: #6c757d; } .btn-reset:hover { background: #5a6268; }
-        input[type="number"] { padding: 5px; width: 60px; font-size: 14px; margin: 0 5px; }
     </style>
     <div class="timer-container">
         <div class="timer-display" id="display">00:00</div>
-        <div style="margin-bottom: 10px;">
-            模式: 
-            <select id="mode" style="padding:5px; border-radius:5px;">
+        <div class="row">
+            <select id="mode">
                 <option value="stopwatch">正计时</option>
                 <option value="countdown">倒计时</option>
             </select>
-            设定: <input type="number" id="minutes" value="25" min="1"> 分钟
+            <span><input type="number" id="minutes" value="25" min="1"> 分</span>
         </div>
         <div class="btn-group">
             <button onclick="startTimer()">开始</button>
@@ -571,10 +499,12 @@ def login_page(db):
         with st.form("login_form"):
             u = st.text_input("用户名"); p = st.text_input("密码", type="password")
             if st.form_submit_button("登录", type="primary", use_container_width=True):
-                user = db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
-                if user and user["password_hash"] == hash_pwd(p):
-                    st.session_state.user = u; st.session_state.role = user["role"]; st.rerun()
-                else: st.error("用户名或密码错误")
+                try:
+                    user = db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
+                    if user and user["password_hash"] == hash_pwd(p):
+                        st.session_state.user = u; st.session_state.role = user["role"]; st.rerun()
+                    else: st.error("用户名或密码错误")
+                except RuntimeError as e: st.error(str(e))
                 
     with tab2:
         with st.form("reg_form"):
@@ -584,56 +514,61 @@ def login_page(db):
                 if not u or not p or not sq or not sa: st.error("请填写所有字段（含密保）")
                 elif p != p2: st.error("密码不一致")
                 elif u.lower() in ["system", "admin", "晴"]: st.error("该用户名为系统保留，请换一个")
-                elif db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error("用户名已存在")
                 else:
-                    db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'user', ?, ?)", (u, hash_pwd(p), sq, hash_pwd(sa.strip().lower())))
-                    db.commit(); st.success("注册成功！请去登录。")
+                    try:
+                        if db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error("用户名已存在")
+                        else:
+                            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'user', ?, ?)", (u, hash_pwd(p), sq, hash_pwd(sa.strip().lower())))
+                            db.commit(); st.success("注册成功！请去登录。")
+                    except RuntimeError as e: st.error(str(e))
 
     with tab3:
         st.write("输入用户名，验证密保问题后重设密码。")
         u_reset = st.text_input("请输入你的用户名", key="reset_u")
         if u_reset:
-            user = db.execute("SELECT * FROM users WHERE username=?", (u_reset,)).fetchone()
-            if user:
-                sq = user.get("security_question")
-                if not sq: st.warning("该账户未设置密保问题，请联系管理员重置密码。")
-                else:
-                    with st.form("reset_form"):
-                        st.info(f"密保问题：{html.escape(sq)}")
-                        ans = st.text_input("密保答案"); new_p = st.text_input("新密码", type="password")
-                        if st.form_submit_button("确认重置密码", type="primary"):
-                            if not ans or not new_p: st.error("请填写完整")
-                            elif hash_pwd(ans.strip().lower()) == user["security_answer"]:
-                                db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_p), u_reset))
-                                db.commit(); st.success("密码重置成功！请去登录。")
-                            else: st.error("密保答案错误！")
-            else: st.error("该用户名不存在")
+            try:
+                user = db.execute("SELECT * FROM users WHERE username=?", (u_reset,)).fetchone()
+                if user:
+                    sq = user.get("security_question")
+                    if not sq: st.warning("该账户未设置密保问题，请联系管理员重置密码。")
+                    else:
+                        with st.form("reset_form"):
+                            st.info(f"密保问题：{html.escape(sq)}")
+                            ans = st.text_input("密保答案"); new_p = st.text_input("新密码", type="password")
+                            if st.form_submit_button("确认重置密码", type="primary"):
+                                if not ans or not new_p: st.error("请填写完整")
+                                elif hash_pwd(ans.strip().lower()) == user["security_answer"]:
+                                    db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_p), u_reset))
+                                    db.commit(); st.success("密码重置成功！请去登录。")
+                                else: st.error("密保答案错误！")
+                else: st.error("该用户名不存在")
+            except RuntimeError as e: st.error(str(e))
 
 def main():
     st.set_page_config(page_title="学习打卡系统", layout="centered", initial_sidebar_state="collapsed")
-    db = get_db()
+    try: db = get_db()
+    except RuntimeError as e: st.error(str(e)); st.stop()
 
     if "user" not in st.session_state:
         login_page(db); return
 
     current_user = st.session_state.user
-    user_row = db.execute("SELECT * FROM users WHERE username=?", (current_user,)).fetchone()
-    if not user_row:
-        del st.session_state.user; st.rerun()
+    try:
+        user_row = db.execute("SELECT * FROM users WHERE username=?", (current_user,)).fetchone()
+        if not user_row: del st.session_state.user; st.rerun()
+    except RuntimeError as e: st.error(str(e)); st.stop()
     
     current_role = user_row["role"]
     st.session_state.role = current_role
-    all_users_data = get_all_users(db)
+    
+    try: all_users_data = get_all_users(db)
+    except Exception: all_users_data = []
     user_names = [u["username"] for u in all_users_data]
 
-    # 获取用户时区，默认为 8.0 (北京时间)
     user_tz = user_row.get("timezone_offset")
     if user_tz is None: user_tz = 8.0
+    now = get_user_now(user_tz); today = now.date()
 
-    now = get_user_now(user_tz)
-    today = now.date()
-
-    # 提醒逻辑
     try:
         if now.hour >= 21:
             today_record = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), current_user)).fetchone()
@@ -655,13 +590,15 @@ def main():
         
         makeup_cards = user_row.get("makeup_cards") or 0
         st.info(f"当前身份：{html.escape(view_as)} ({current_role})\n\n当地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{makeup_cards} 张")
-        bal = get_balance(view_as)
+        try: bal = get_balance(view_as)
+        except Exception: bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
         st.metric("当前可用积分", f"{bal['balance']:.1f}")
         
         if not is_mobile_mode:
             with st.expander("专注计时器 (番茄钟)", expanded=False): render_timer()
             with st.expander("我的成就徽章"):
-                user_badges = get_user_badges(view_as)
+                try: user_badges = get_user_badges(view_as)
+                except Exception: user_badges = []
                 if user_badges:
                     for i in range(0, len(user_badges), 3):
                         cols = st.columns(3)
@@ -680,42 +617,55 @@ def main():
 
             st.divider()
             with st.expander("账号与数据设置"):
-                # 时区设置
                 st.markdown("**时区设置**")
-                curr_tz_name = next((k for k, v in TIMEZONES.items() if v == user_tz), "北京时间 (UTC+8)")
+                curr_tz_name = next((k for k, v in TIMEZONES.items() if v == user_tz), "自定义时区")
                 new_tz_name = st.selectbox("所在地区/时区", list(TIMEZONES.keys()), index=list(TIMEZONES.keys()).index(curr_tz_name))
                 
+                if new_tz_name == "自定义时区":
+                    custom_tz = st.number_input("输入 UTC 偏移小时数 (如 5.5 代表印度)", value=user_tz, step=0.5)
+                    final_tz = custom_tz
+                else:
+                    final_tz = TIMEZONES[new_tz_name]
+
                 if st.button("保存时区设置"):
-                    db.execute("UPDATE users SET timezone_offset=? WHERE username=?", (TIMEZONES[new_tz_name], current_user))
-                    db.commit()
-                    st.success("时区已更新！")
-                    st.rerun()
+                    try:
+                        db.execute("UPDATE users SET timezone_offset=? WHERE username=?", (final_tz, current_user))
+                        db.commit(); st.success("时区已更新！"); st.rerun()
+                    except RuntimeError as e: st.error(str(e))
 
                 st.divider()
                 new_name = st.text_input("新用户名", placeholder="留空则不修改")
                 if st.button("确认修改用户名"):
                     if new_name and new_name != current_user:
                         if new_name.lower() in ["system", "admin", "晴"]: st.error("该用户名为系统保留，请换一个")
-                        elif db.execute("SELECT * FROM users WHERE username=?", (new_name,)).fetchone(): st.error("该用户名已被占用")
                         else:
-                            for tbl in ["daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
-                                db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
-                            db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
-                            db.commit(); st.session_state.user = new_name; st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
+                            try:
+                                if db.execute("SELECT * FROM users WHERE username=?", (new_name,)).fetchone(): st.error("该用户名已被占用")
+                                else:
+                                    for tbl in ["daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
+                                        db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
+                                    db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
+                                    db.commit(); st.session_state.user = new_name; st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
                 
                 st.divider()
                 new_pwd = st.text_input("新密码", type="password", key="new_pwd")
                 if st.button("确认修改密码"):
-                    if new_pwd: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_pwd), current_user)); db.commit(); st.success("密码已修改！")
+                    if new_pwd: 
+                        try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_pwd), current_user)); db.commit(); st.success("密码已修改！")
+                        except RuntimeError as e: st.error(str(e))
                 
                 st.divider()
                 webhook_input = st.text_input("防遗忘提醒 Webhook", value=user_row.get("webhook_url") or "")
                 if st.button("保存 Webhook"):
-                    db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user)); db.commit(); st.success("保存成功！")
+                    try: db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user)); db.commit(); st.success("保存成功！")
+                    except RuntimeError as e: st.error(str(e))
                 
                 st.divider()
-                my_data = {"daily_records": [dict(r) for r in db.execute("SELECT * FROM daily_records WHERE owner_id=?", (current_user,)).fetchall()], "exam_rewards": [dict(r) for r in db.execute("SELECT * FROM exam_rewards WHERE owner_id=?", (current_user,)).fetchall()], "redemptions": [dict(r) for r in db.execute("SELECT * FROM redemptions WHERE owner_id=?", (current_user,)).fetchall()], "extra_points": [dict(r) for r in db.execute("SELECT * FROM extra_points WHERE owner_id=?", (current_user,)).fetchall()], "special_events": [dict(r) for r in db.execute("SELECT * FROM special_events WHERE owner_id=?", (current_user,)).fetchall()]}
-                st.download_button("📥 导出我的数据 (JSON)", data=json.dumps(my_data, ensure_ascii=False, indent=2, default=str), file_name=f"backup_{current_user}.json", mime="application/json", use_container_width=True)
+                try:
+                    my_data = {"daily_records": [dict(r) for r in db.execute("SELECT * FROM daily_records WHERE owner_id=?", (current_user,)).fetchall()], "exam_rewards": [dict(r) for r in db.execute("SELECT * FROM exam_rewards WHERE owner_id=?", (current_user,)).fetchall()], "redemptions": [dict(r) for r in db.execute("SELECT * FROM redemptions WHERE owner_id=?", (current_user,)).fetchall()], "extra_points": [dict(r) for r in db.execute("SELECT * FROM extra_points WHERE owner_id=?", (current_user,)).fetchall()], "special_events": [dict(r) for r in db.execute("SELECT * FROM special_events WHERE owner_id=?", (current_user,)).fetchall()]}
+                    st.download_button("📥 导出我的数据 (JSON)", data=json.dumps(my_data, ensure_ascii=False, indent=2, default=str), file_name=f"backup_{current_user}.json", mime="application/json", use_container_width=True)
+                except Exception: pass
         
         st.divider()
         if st.button("退出登录"): del st.session_state.user; del st.session_state.role; st.rerun()
@@ -728,14 +678,20 @@ def main():
     tab_objs = st.tabs(tabs); tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
 
     with tab_dict.get("打卡"):
-        tasks = get_tasks(today.weekday(), view_as)
+        try: tasks = get_tasks(today.weekday(), view_as)
+        except Exception: tasks = []
+        
         if not tasks: st.warning("今日还没有配置任务哦，请去【系统设置】里添加！")
         else:
-            thresholds = get_thresholds(view_as); thr = thresholds.get(today.weekday(), {"basic":0,"full":0})
+            try: thresholds = get_thresholds(view_as); thr = thresholds.get(today.weekday(), {"basic":0,"full":0})
+            except Exception: thr = {"basic": 0, "full": 0}
+            
             st.subheader(f"{today.strftime('%m月%d日')} - {WEEKDAY_CN[today.weekday()]}")
             st.caption(f"基本要求：{thr['basic']} 分 | 满分：{thr['full']} 分")
             
-            existing = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), view_as)).fetchone()
+            try: existing = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), view_as)).fetchone()
+            except Exception: existing = None
+            
             already_done = existing is not None; done_ids = set(json.loads(existing["done_tasks"])) if existing else set()
             
             cats = {}
@@ -760,17 +716,24 @@ def main():
                 c1.metric("基础分", f"{existing['base_score']:.1f}"); c2.metric("Bonus", f"{existing['bonus_score']:.1f}"); c3.metric("今日总分", f"{existing['total_score']:.1f}")
                 st.success("今日已完成打卡，记录已锁定。")
                 if st.button("撤销今日打卡（重新填写）", type="secondary", use_container_width=True):
-                    db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), view_as))
-                    db.commit(); recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as); st.cache_data.clear(); st.rerun()
+                    try:
+                        db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), view_as))
+                        db.commit(); recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat()); st.cache_data.clear(); st.rerun()
+                    except RuntimeError as e: st.error(str(e))
             else:
                 base_now = sum(t["points"] for t in tasks if t["id"] in set(selected_ids))
-                lookup = {r["day"]: {"base_score": r["base_score"], "basic_thr": r.get("basic_thr"), "full_thr": r.get("full_thr")} for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
-                lookup[today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
-                bonus, detail = compute_bonus_for_day(today, lookup, get_bonus_rules(view_as))
+                try:
+                    lookup = {r["day"]: {"base_score": r["base_score"], "basic_thr": r.get("basic_thr"), "full_thr": r.get("full_thr")} for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
+                    lookup[today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
+                    bonus, detail = compute_bonus_for_day(today, lookup, get_bonus_rules(view_as))
+                except Exception:
+                    bonus, detail = 0.0, {}
+                    
                 c1.metric("基础分", f"{base_now:.1f}"); c2.metric("Bonus", f"{bonus:.1f}"); c3.metric("预计总分", f"{base_now + bonus:.1f}")
                 if detail.get("tier") in TIER_CN: st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
                 if st.button("保存今日打卡", type="primary", use_container_width=True):
-                    save_day(db, get_user_today(user_tz), selected_ids, view_as, now.isoformat()); st.success("已保存！"); st.rerun()
+                    try: save_day(db, get_user_today(user_tz), selected_ids, view_as, now.isoformat()); st.success("已保存！"); st.rerun()
+                    except RuntimeError as e: st.error(str(e))
 
     if "偶发" in tab_dict:
         with tab_dict["偶发"]:
@@ -780,12 +743,16 @@ def main():
                 e_name = col1.text_input("事件名称", placeholder="例如：高分作文..."); e_pts = col2.number_input("分数 (可为负数)", value=1.0, step=0.5)
                 if st.form_submit_button("确认提交", type="primary", use_container_width=True):
                     if e_name:
-                        db.execute("INSERT INTO extra_points (owner_id, name, points, ts) VALUES (?,?,?,?)", (view_as, e_name, e_pts, now.isoformat()))
-                        db.commit(); st.cache_data.clear(); st.success(f"已记录：{html.escape(e_name)} ({e_pts}分)"); st.rerun()
-            st.divider(); ex_rows = db.execute("SELECT * FROM extra_points WHERE owner_id=? ORDER BY id DESC LIMIT 20", (view_as,)).fetchall()
+                        try: db.execute("INSERT INTO extra_points (owner_id, name, points, ts) VALUES (?,?,?,?)", (view_as, e_name, e_pts, now.isoformat())); db.commit(); st.cache_data.clear(); st.success(f"已记录：{html.escape(e_name)} ({e_pts}分)"); st.rerun()
+                        except RuntimeError as e: st.error(str(e))
+            st.divider()
+            try: ex_rows = db.execute("SELECT * FROM extra_points WHERE owner_id=? ORDER BY id DESC LIMIT 20", (view_as,)).fetchall()
+            except Exception: ex_rows = []
             if ex_rows:
                 st.dataframe([{"时间": r["ts"], "事件": html.escape(r["name"]), "积分": r["points"]} for r in ex_rows], use_container_width=True, hide_index=True)
-                if st.button("清空偶发记录"): db.execute("DELETE FROM extra_points WHERE owner_id=?", (view_as,)); db.commit(); st.cache_data.clear(); st.rerun()
+                if st.button("清空偶发记录"): 
+                    try: db.execute("DELETE FROM extra_points WHERE owner_id=?", (view_as,)); db.commit(); st.cache_data.clear(); st.rerun()
+                    except RuntimeError as e: st.error(str(e))
             else: st.caption("暂无记录")
 
     if "历史与图表" in tab_dict:
@@ -794,7 +761,8 @@ def main():
             makeup_cards = user_row.get("makeup_cards") or 0
             if makeup_cards > 0:
                 st.markdown(f"🎫 **你有 {makeup_cards} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
-                missing_dates = [today - timedelta(days=i) for i in range(1, 8) if not db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", ((today - timedelta(days=i)).isoformat(), view_as)).fetchone()]
+                try: missing_dates = [today - timedelta(days=i) for i in range(1, 8) if not db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", ((today - timedelta(days=i)).isoformat(), view_as)).fetchone()]
+                except Exception: missing_dates = []
                 
                 if missing_dates:
                     sel_date = st.selectbox("选择要补签的日期", missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({WEEKDAY_CN[x.weekday()]})")
@@ -803,22 +771,26 @@ def main():
                     with st.form("makeup_form"):
                         selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
                         if st.form_submit_button("使用 1 张补签卡并提交", type="primary"):
-                            db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (current_user,))
-                            db.commit()
-                            
-                            curr_cards = db.execute("SELECT makeup_cards FROM users WHERE username=?", (current_user,)).fetchone()["makeup_cards"]
-                            if curr_cards >= 0:
-                                t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
-                                db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
-                                db.execute("INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)", (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"]))
-                                db.commit(); recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as); st.cache_data.clear(); st.success("补签成功！"); st.rerun()
-                            else: st.error("补签失败，余额不足。")
+                            try:
+                                cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (current_user,))
+                                db.commit()
+                                
+                                # 使用 rowcount 杜绝并发白嫖
+                                if cur.rowcount > 0:
+                                    t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
+                                    db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
+                                    db.execute("INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)", (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"]))
+                                    db.commit(); recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat()); st.cache_data.clear(); st.success("补签成功！"); st.rerun()
+                                else: st.error("补签失败，余额不足。")
+                            except RuntimeError as e: st.error(str(e))
                 else: st.info("最近 7 天全勤！")
             else: st.info("💡 提示：商城有售“补签卡”。")
                 
             st.divider()
             time_view = st.radio("时间维度", ["按日查看", "按周查看", "按月查看"], horizontal=True)
-            all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
+            try: all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
+            except Exception: all_recs = []
+            
             if all_recs:
                 df = pd.DataFrame([{"日期": r["day"], "总分": r["total_score"]} for r in all_recs])
                 df["日期"] = pd.to_datetime(df["日期"])
@@ -831,22 +803,30 @@ def main():
             else: st.info("暂无数据。")
                 
             st.divider(); st.subheader("历史打卡详情")
-            days = [r["day"] for r in db.execute("SELECT day FROM daily_records WHERE owner_id=? ORDER BY day DESC", (view_as,)).fetchall()]
+            try: days = [r["day"] for r in db.execute("SELECT day FROM daily_records WHERE owner_id=? ORDER BY day DESC", (view_as,)).fetchall()]
+            except Exception: days = []
+            
             if days:
                 sel = st.selectbox("选择日期", days)
-                row = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (sel, view_as)).fetchone()
-                st.write(f"**总分: {row['total_score']:.1f}** (基础 {row['base_score']:.1f} + Bonus {row['bonus_score']:.1f})")
-                done = json.loads(row["done_tasks"])
-                st.write("完成项：", ", ".join([html.escape(t["name"]) for t in get_tasks(date.fromisoformat(sel).weekday(), view_as) if t["id"] in done]) or "无")
+                try:
+                    row = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (sel, view_as)).fetchone()
+                    st.write(f"**总分: {row['total_score']:.1f}** (基础 {row['base_score']:.1f} + Bonus {row['bonus_score']:.1f})")
+                    done = json.loads(row["done_tasks"])
+                    st.write("完成项：", ", ".join([html.escape(t["name"]) for t in get_tasks(date.fromisoformat(sel).weekday(), view_as) if t["id"] in done]) or "无")
+                except Exception: pass
             else: st.info("暂无记录")
 
     if "商城" in tab_dict:
         with tab_dict["商城"]:
             st.subheader("商城")
-            shop_items = get_shop(view_as)
+            try: shop_items = get_shop(view_as)
+            except Exception: shop_items = []
+            
             if not shop_items: st.warning("商城空！")
             else:
-                bal = get_balance(view_as)
+                try: bal = get_balance(view_as)
+                except Exception: bal = {"balance": 0}
+                
                 for name, cost in shop_items:
                     c1, c2, c3 = st.columns([5, 2, 2])
                     c1.write(f"**{html.escape(name)}**"); c2.write(f"`{cost} 分`")
@@ -854,9 +834,11 @@ def main():
                     if st.session_state.get(confirm_key):
                         cc1, cc2 = st.columns(2)
                         if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", type="primary"):
-                            if name == "补签卡": db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
-                            db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
-                            db.commit(); st.session_state[confirm_key] = False; st.cache_data.clear(); st.success("兑换成功！"); st.rerun()
+                            try:
+                                if name == "补签卡": db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (current_user,))
+                                db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
+                                db.commit(); st.session_state[confirm_key] = False; st.cache_data.clear(); st.success("兑换成功！"); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
                         if cc2.button("取消", key=f"no_{view_as}_{name}"):
                             st.session_state[confirm_key] = False; st.rerun()
                     else:
@@ -866,14 +848,18 @@ def main():
     if "兑换" in tab_dict:
         with tab_dict["兑换"]:
             st.subheader("兑换历史")
-            rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
+            try: rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
+            except Exception: rows = []
+            
             if rows: st.dataframe([{"时间": r["ts"], "奖励": html.escape(r["item"]), "消耗": r["cost"]} for r in rows], use_container_width=True)
             else: st.info("暂无")
 
     if "考试" in tab_dict:
         with tab_dict["考试"]:
             st.subheader("考试专项")
-            exam_config, _ = get_exam_config(view_as)
+            try: exam_config, _ = get_exam_config(view_as)
+            except Exception: exam_config = {}
+            
             if not exam_config: st.warning("未设置考试科目！")
             else:
                 scores = {}; ranks = {}
@@ -900,24 +886,30 @@ def main():
                 st.divider(); st.markdown(f"### 预计获得：**{total_pts:.1f}** 分（达成 {hit_count} 门）")
                 for ln in lines: st.write(ln)
                 if st.button("保存本次成绩", type="primary"):
-                    detail_text = f"达成 {hit_count} 门 | " + "/".join([f"{k}:{v}" for k,v in scores.items()])
-                    db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
-                    db.commit(); st.cache_data.clear(); st.success("已保存！"); st.rerun()
+                    try:
+                        detail_text = f"达成 {hit_count} 门 | " + "/".join([f"{k}:{v}" for k,v in scores.items()])
+                        db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
+                        db.commit(); st.cache_data.clear(); st.success("已保存！"); st.rerun()
+                    except RuntimeError as e: st.error(str(e))
 
     if "事件" in tab_dict:
         with tab_dict["事件"]:
             st.subheader("特殊事件")
-            fired = db.execute("SELECT * FROM special_events WHERE day=? AND owner_id=?", (today.isoformat(), view_as)).fetchone()
+            try: fired = db.execute("SELECT * FROM special_events WHERE day=? AND owner_id=?", (today.isoformat(), view_as)).fetchone()
+            except Exception: fired = None
+            
             if fired: st.info(f"今天已经触发过啦：{html.escape(fired['note'])} +{fired['points']}分")
             else:
                 if st.session_state.get("confirm_roll"):
                     st.warning("🎲 确认消耗今天的机会摇一摇吗？")
                     rc1, rc2 = st.columns(2)
                     if rc1.button("确认摇一摇", type="primary", use_container_width=True):
-                        roll = random.random()
-                        pts = random.randint(1, 2) if roll < 0.4 else random.randint(3, 5) if roll < 0.8 else random.randint(6, 8) if roll < 0.95 else random.randint(10, 15)
-                        db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (today.isoformat(), view_as, pts, "积分暴击", now.isoformat()))
-                        db.commit(); st.session_state["confirm_roll"] = False; st.cache_data.clear(); st.balloons(); st.success(f"获得 {pts} 积分！"); st.rerun()
+                        try:
+                            roll = random.random()
+                            pts = random.randint(1, 2) if roll < 0.4 else random.randint(3, 5) if roll < 0.8 else random.randint(6, 8) if roll < 0.95 else random.randint(10, 15)
+                            db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (today.isoformat(), view_as, pts, "积分暴击", now.isoformat()))
+                            db.commit(); st.session_state["confirm_roll"] = False; st.cache_data.clear(); st.balloons(); st.success(f"获得 {pts} 积分！"); st.rerun()
+                        except RuntimeError as e: st.error(str(e))
                     if rc2.button("取消", use_container_width=True):
                         st.session_state["confirm_roll"] = False; st.rerun()
                 else:
@@ -932,27 +924,37 @@ def main():
 
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
-            tasks_df = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=?", (sel_wd, view_as)).fetchall()
+            try: tasks_df = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=?", (sel_wd, view_as)).fetchall()
+            except Exception: tasks_df = []
+            
             edited_tasks = st.data_editor([dict(t) for t in tasks_df], column_config={"id": st.column_config.TextColumn("任务ID", required=True), "weekday": None, "owner_id": None, "category": st.column_config.TextColumn("分类"), "name": st.column_config.TextColumn("任务名称", required=True), "points": st.column_config.NumberColumn("分数", min_value=0.0, step=0.5)}, num_rows="dynamic", use_container_width=True, key=f"edit_task_{view_as}_{sel_wd}")
             if st.button("保存任务修改"):
-                db.execute("DELETE FROM config_tasks WHERE weekday=? AND owner_id=?", (sel_wd, view_as))
-                for t in edited_tasks:
-                    if t.get("id") and t.get("name"): db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (t["id"], sel_wd, view_as, t["category"], t["name"], t["points"]))
-                db.commit(); st.cache_data.clear(); st.success("任务已更新！"); st.rerun()
+                try:
+                    db.execute("DELETE FROM config_tasks WHERE weekday=? AND owner_id=?", (sel_wd, view_as))
+                    for t in edited_tasks:
+                        if t.get("id") and t.get("name"): db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (t["id"], sel_wd, view_as, t["category"], t["name"], t["points"]))
+                    db.commit(); st.cache_data.clear(); st.success("任务已更新！"); st.rerun()
+                except RuntimeError as e: st.error(str(e))
 
             st.divider()
             st.markdown("### 2. 修改商城奖励")
-            shop_df = db.execute("SELECT id, name, cost FROM config_shop WHERE owner_id=?", (view_as,)).fetchall()
+            try: shop_df = db.execute("SELECT id, name, cost FROM config_shop WHERE owner_id=?", (view_as,)).fetchall()
+            except Exception: shop_df = []
+            
             edited_shop = st.data_editor([dict(s) for s in shop_df], column_config={"id": None, "name": st.column_config.TextColumn("奖励名称", required=True), "cost": st.column_config.NumberColumn("所需积分", min_value=0.0, step=1.0)}, num_rows="dynamic", use_container_width=True, key=f"edit_shop_{view_as}")
             if st.button("保存商城修改"):
-                db.execute("DELETE FROM config_shop WHERE owner_id=?", (view_as,))
-                for s in edited_shop:
-                    if s.get("name") and s.get("cost") is not None: db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (view_as, s["name"], s["cost"]))
-                db.commit(); st.cache_data.clear(); st.success("商城已更新！"); st.rerun()
+                try:
+                    db.execute("DELETE FROM config_shop WHERE owner_id=?", (view_as,))
+                    for s in edited_shop:
+                        if s.get("name") and s.get("cost") is not None: db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (view_as, s["name"], s["cost"]))
+                    db.commit(); st.cache_data.clear(); st.success("商城已更新！"); st.rerun()
+                except RuntimeError as e: st.error(str(e))
 
             st.divider()
             st.markdown("### 3. 修改考试科目")
-            exam_config, exam_rules = get_exam_config(view_as)
+            try: exam_config, exam_rules = get_exam_config(view_as)
+            except Exception: exam_config = {}
+            
             df_exam_data = []
             for k, v in exam_config.items():
                 max_s = v.get("max_score") if v["type"] == "score" else None
@@ -971,37 +973,45 @@ def main():
             )
             
             if st.button("保存考试科目修改"):
-                db.execute("DELETE FROM config_exam WHERE owner_id=?", (view_as,))
-                has_error = False
-                for _, row in edited_exam.iterrows():
-                    if pd.notna(row["科目"]) and row["科目"]:
-                        sub = row["科目"]; e_type = str(row["类型"]).strip().lower(); e_target = str(row["目标"]).strip()
-                        if e_type not in ["score", "grade"]: st.error(f"科目 {sub} 类型错误"); has_error = True; break
-                        if e_type == "score":
-                            try: e_target_val = float(e_target)
-                            except ValueError: st.error(f"科目 {sub} 目标必须是数字"); has_error = True; break
-                            cfg = {"type": "score", "max_score": float(row["满分"] or 150), "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
-                        else:
-                            if e_target not in GRADES: st.error(f"科目 {sub} 目标必须在 11 档内"); has_error = True; break
-                            cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
-                        db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
-                if has_error: db.commit()
-                else: db.commit(); st.cache_data.clear(); st.success("科目已更新！"); st.rerun()
+                try:
+                    db.execute("DELETE FROM config_exam WHERE owner_id=?", (view_as,))
+                    has_error = False
+                    for _, row in edited_exam.iterrows():
+                        if pd.notna(row["科目"]) and row["科目"]:
+                            sub = row["科目"]; e_type = str(row["类型"]).strip().lower(); e_target = str(row["目标"]).strip()
+                            if e_type not in ["score", "grade"]: st.error(f"科目 {sub} 类型错误"); has_error = True; break
+                            if e_type == "score":
+                                try: e_target_val = float(e_target)
+                                except ValueError: st.error(f"科目 {sub} 目标必须是数字"); has_error = True; break
+                                cfg = {"type": "score", "max_score": float(row["满分"] or 150), "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
+                            else:
+                                if e_target not in GRADES: st.error(f"科目 {sub} 目标必须在 11 档内"); has_error = True; break
+                                cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
+                            db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
+                    if has_error: db.commit()
+                    else: db.commit(); st.cache_data.clear(); st.success("科目已更新！"); st.rerun()
+                except RuntimeError as e: st.error(str(e))
 
             st.divider()
             st.markdown("### 4. 修改多科达成奖励")
-            mh_df = pd.DataFrame(get_exam_multihit(view_as))
+            try: mh_list = get_exam_multihit(view_as)
+            except Exception: mh_list = []
+            mh_df = pd.DataFrame(mh_list)
             if mh_df.empty: mh_df = pd.DataFrame(columns=["hit_count", "points"])
             edited_mh = st.data_editor(mh_df, column_config={"hit_count": st.column_config.NumberColumn("达成科目数", min_value=1, step=1), "points": st.column_config.NumberColumn("奖励分数", min_value=0.0, step=0.5)}, num_rows="dynamic", use_container_width=True, key=f"edit_mh_{view_as}")
             if st.button("保存多科奖励修改"):
-                db.execute("DELETE FROM config_exam_multihit WHERE owner_id=?", (view_as,))
-                for _, row in edited_mh.iterrows():
-                    if pd.notna(row["hit_count"]) and pd.notna(row["points"]): db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (int(row["hit_count"]), view_as, float(row["points"])))
-                db.commit(); st.cache_data.clear(); st.success("多科奖励已更新！"); st.rerun()
+                try:
+                    db.execute("DELETE FROM config_exam_multihit WHERE owner_id=?", (view_as,))
+                    for _, row in edited_mh.iterrows():
+                        if pd.notna(row["hit_count"]) and pd.notna(row["points"]): db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (int(row["hit_count"]), view_as, float(row["points"])))
+                    db.commit(); st.cache_data.clear(); st.success("多科奖励已更新！"); st.rerun()
+                except RuntimeError as e: st.error(str(e))
 
             st.divider()
             st.markdown("### 5. 修改阈值与 Bonus 规则 (老数据不受影响)")
-            thresholds = get_thresholds(view_as); bonus_rules = get_bonus_rules(view_as)
+            try: thresholds = get_thresholds(view_as); bonus_rules = get_bonus_rules(view_as)
+            except Exception: thresholds = {}; bonus_rules = DEFAULT_BONUS_RULES
+            
             with st.form(f"bonus_form_{view_as}"):
                 t_cols = st.columns(7); t_inputs = {}
                 for i in range(7):
@@ -1031,18 +1041,20 @@ def main():
                     flex_b = st.number_input("弹性达标扣减 (少1天达标)", value=float(bonus_rules["longterm"].get("week_flex_basic_deduct", 0.5)), step=0.5, key=f"b14_{view_as}")
 
                 if st.form_submit_button("保存新规则 (即刻生效)", type="primary", use_container_width=True):
-                    for i in range(7): 
-                        db.execute("DELETE FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as))
-                        db.execute("INSERT INTO config_thresholds (weekday, owner_id, basic, \"full\") VALUES (?,?,?,?)", (i, view_as, t_inputs[i]["basic"], t_inputs[i]["full"]))
-                    
-                    new_bonus = {
-                        "weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}}, 
-                        "weekend": {"single": {"points": we_single, "full_points": we_single_full}}, 
-                        "longterm": {"week_basic": lt_wb, "week_full": lt_wf, "month_basic": lt_mb, "month_full": lt_mf, "week_flex_perfect_deduct": flex_p, "week_flex_basic_deduct": flex_b}
-                    }
-                    db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
-                    db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
-                    db.commit(); st.cache_data.clear(); st.success("✅ 新标准已启用！"); st.rerun()
+                    try:
+                        for i in range(7): 
+                            db.execute("DELETE FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as))
+                            db.execute("INSERT INTO config_thresholds (weekday, owner_id, basic, \"full\") VALUES (?,?,?,?)", (i, view_as, t_inputs[i]["basic"], t_inputs[i]["full"]))
+                        
+                        new_bonus = {
+                            "weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}}, 
+                            "weekend": {"single": {"points": we_single, "full_points": we_single_full}}, 
+                            "longterm": {"week_basic": lt_wb, "week_full": lt_wf, "month_basic": lt_mb, "month_full": lt_mf, "week_flex_perfect_deduct": flex_p, "week_flex_basic_deduct": flex_b}
+                        }
+                        db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
+                        db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
+                        db.commit(); st.cache_data.clear(); st.success("✅ 新标准已启用！"); st.rerun()
+                    except RuntimeError as e: st.error(str(e))
 
             st.divider()
             st.markdown("### 6. 全局徽章配置与 AI 生成 (仅管理员可操作)")
@@ -1056,14 +1068,18 @@ def main():
                     
                     if st.form_submit_button("✨ AI 生成并添加", type="primary"):
                         if b_name:
-                            seed = random.randint(1, 99999)
-                            prompt = f"Minimalist flat vector icon for '{b_name}', clean simple design, ui app icon, no text, white background, not exaggerated."
-                            icon_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=256&height=256&nologo=true&seed={seed}"
-                            db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (b_name, b_type, b_val, icon_url))
-                            db.commit(); st.cache_data.clear(); st.success(f"徽章「{html.escape(b_name)}」已生成！"); st.rerun()
+                            try:
+                                seed = random.randint(1, 99999)
+                                prompt = f"Minimalist flat vector icon for '{b_name}', clean simple design, ui app icon, no text, white background, not exaggerated."
+                                icon_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=256&height=256&nologo=true&seed={seed}"
+                                db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (b_name, b_type, b_val, icon_url))
+                                db.commit(); st.cache_data.clear(); st.success(f"徽章「{html.escape(b_name)}」已生成！"); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
                 
                 st.markdown("**当前全局已配置的徽章：**")
-                existing_badges = get_badge_configs()
+                try: existing_badges = get_badge_configs()
+                except Exception: existing_badges = []
+                
                 if existing_badges:
                     for b in existing_badges:
                         c1, c2, c3, c4 = st.columns([2, 3, 3, 2])
@@ -1072,8 +1088,8 @@ def main():
                         type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
                         c3.write(f"条件：{type_cn} ≥ {b['cond_val']}")
                         if c4.button("删除", key=f"del_badge_{b['id']}"):
-                            db.execute("DELETE FROM config_badges WHERE id=?", (b["id"],))
-                            db.commit(); st.cache_data.clear(); st.rerun()
+                            try: db.execute("DELETE FROM config_badges WHERE id=?", (b["id"],)); db.commit(); st.cache_data.clear(); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
 
             if current_role == "admin":
                 st.divider()
@@ -1085,19 +1101,27 @@ def main():
                     if urole == "admin":
                         c2.success("🟢 管理员")
                         if uname != current_user: 
-                            if c3.button("降级为普通用户", key=f"demote_{uname}"): db.execute("UPDATE users SET role='user' WHERE username=?", (uname,)); db.commit(); st.rerun()
+                            if c3.button("降级为普通用户", key=f"demote_{uname}"): 
+                                try: db.execute("UPDATE users SET role='user' WHERE username=?", (uname,)); db.commit(); st.rerun()
+                                except RuntimeError as e: st.error(str(e))
                     else:
                         c2.info("⚪ 普通用户")
-                        if c3.button("提升为管理员", key=f"promote_{uname}"): db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,)); db.commit(); st.rerun()
+                        if c3.button("提升为管理员", key=f"promote_{uname}"): 
+                            try: db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,)); db.commit(); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
                     
-                    if c4.button("重置密码", key=f"reset_{uname}"): db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd("123456"), uname)); db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
+                    if c4.button("重置密码", key=f"reset_{uname}"): 
+                        try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd("123456"), uname)); db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
+                        except RuntimeError as e: st.error(str(e))
                     
                     if uname != current_user:
                         if c5.button("删除账号", key=f"del_{uname}"):
-                            for tbl in ["users", "daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
-                                col = "username" if tbl == "users" else "owner_id"
-                                db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
-                            db.commit(); st.success(f"用户 {uname} 已彻底删除"); st.rerun()
+                            try:
+                                for tbl in ["users", "daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
+                                    col = "username" if tbl == "users" else "owner_id"
+                                    db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
+                                db.commit(); st.success(f"用户 {uname} 已彻底删除"); st.rerun()
+                            except RuntimeError as e: st.error(str(e))
 
 if __name__ == "__main__":
     main()
