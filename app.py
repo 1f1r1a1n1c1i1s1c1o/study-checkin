@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, random, os, hashlib
+import json, random, os, hashlib, urllib.parse, re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import streamlit as st
 import pandas as pd
+import altair as alt
+import streamlit.components.v1 as components
 
 IS_CLOUD = "DATABASE_URL" in st.secrets
 if IS_CLOUD:
@@ -24,15 +26,13 @@ DEFAULT_BONUS_RULES = {
     "weekend": {"single": {"points": 1.0, "full_points": 2.0}}, 
     "longterm": {
         "week_basic": 3.5, "week_full": 7.0, 
-        "week_flex_perfect_deduct": 1.0,  # 弹性完美周扣减分
-        "week_flex_basic_deduct": 0.5,    # 弹性达标周扣减分
+        "week_flex_perfect_deduct": 1.0,
+        "week_flex_basic_deduct": 0.5,
         "month_basic": 8.0, "month_full": 20.0
     }
 }
 DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_points": 1.0, "rank_step_percent": 5.0, "rank_step_points": 1.5}
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
-
-# 11档等级
 GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 def hash_pwd(pwd: str) -> str: return hashlib.sha256(pwd.encode()).hexdigest()
@@ -92,13 +92,16 @@ def init_db(db):
         "CREATE TABLE IF NOT EXISTS config_exam_rules (owner_id TEXT PRIMARY KEY, config_json TEXT)",
         "CREATE TABLE IF NOT EXISTS config_thresholds (weekday INTEGER, owner_id TEXT, basic REAL, \"full\" REAL)",
         "CREATE TABLE IF NOT EXISTS config_bonus_rules (owner_id TEXT PRIMARY KEY, rules_json TEXT)",
-        "CREATE TABLE IF NOT EXISTS config_exam_multihit (hit_count INTEGER, owner_id TEXT, points REAL)"
+        "CREATE TABLE IF NOT EXISTS config_exam_multihit (hit_count INTEGER, owner_id TEXT, points REAL)",
+        # 全局徽章表（归属者固定为 'system'）
+        "CREATE TABLE IF NOT EXISTS config_badges (id SERIAL PRIMARY KEY, owner_id TEXT DEFAULT 'system', name TEXT, cond_type TEXT, cond_val REAL, icon_url TEXT)"
     ]
     for t in tables:
         try: db.execute(t)
         except: pass
     db.commit()
     
+    # 兼容老数据列
     if db.is_cloud:
         alter_queries = [
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
@@ -144,6 +147,7 @@ def init_db(db):
             except: pass
         db.commit()
     
+    # 初始化超级管理员
     try:
         row = db.execute("SELECT * FROM users WHERE username='晴'").fetchone()
         if not row:
@@ -154,6 +158,28 @@ def init_db(db):
             db.execute("UPDATE users SET role='admin' WHERE username='晴'")
         db.commit()
     except Exception: pass
+    
+    # 初始化全局默认徽章
+    try:
+        global_badge_count = db.execute("SELECT COUNT(*) as c FROM config_badges WHERE owner_id='system'").fetchone()["c"]
+        if global_badge_count == 0:
+            db.execute("DELETE FROM config_badges")
+            default_badges = [
+                ("破壳而出", "days", 1),
+                ("持之以恒", "days", 7),
+                ("习惯成自然", "days", 30),
+                ("积分大亨", "points", 100),
+                ("完美主义", "perfect", 1),
+                ("考神附体", "exam_hits", 4)
+            ]
+            for b in default_badges:
+                prompt = f"Minimalist flat vector icon for '{b[0]}', clean simple design, ui app icon, no text, white background, not exaggerated"
+                encoded_prompt = urllib.parse.quote(prompt)
+                icon_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=256&height=256&nologo=true&seed=42"
+                db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (b[0], b[1], b[2], icon_url))
+        db.commit()
+    except Exception:
+        pass
 
 def init_old_admin_data(db):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
@@ -177,7 +203,6 @@ def get_bonus_rules(db, oid):
     row = db.execute("SELECT rules_json FROM config_bonus_rules WHERE owner_id=?", (oid,)).fetchone()
     if not row: return DEFAULT_BONUS_RULES
     rules = json.loads(row["rules_json"])
-    # 兼容老数据，填补新增的配置字段
     if "week_flex_perfect_deduct" not in rules["longterm"]: rules["longterm"]["week_flex_perfect_deduct"] = 1.0
     if "week_flex_basic_deduct" not in rules["longterm"]: rules["longterm"]["week_flex_basic_deduct"] = 0.5
     return rules
@@ -190,6 +215,10 @@ def get_exam_config(db, oid):
     rule_row = db.execute("SELECT config_json FROM config_exam_rules WHERE owner_id=?", (oid,)).fetchone()
     return subjects, json.loads(rule_row["config_json"]) if rule_row else DEFAULT_EXAM_RULES
 def get_exam_multihit(db, oid): return [{"hit_count": r["hit_count"], "points": r["points"]} for r in db.execute("SELECT * FROM config_exam_multihit WHERE owner_id=? ORDER BY hit_count ASC", (oid,)).fetchall()]
+
+# 新增：获取全局徽章配置
+def get_badge_configs(db):
+    return db.execute("SELECT * FROM config_badges WHERE owner_id='system' ORDER BY id ASC").fetchall()
 
 def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict) -> tuple[float, dict]:
     key = day.isoformat(); rec = lookup.get(key)
@@ -240,13 +269,12 @@ def settle_longterm_bonus(db, oid):
     if not scores: 
         db.commit(); return
 
-    # 1. 先计算所有完整周的达标/满分情况，缓存起来
     weeks = {}
     for ds in scores:
         d = date.fromisoformat(ds); y, w, _ = d.isocalendar()
         weeks.setdefault(f"{y}-W{w:02d}", []).append(d)
         
-    week_status = {} # 存储每一周的状态字典: {'is_perfect': bool, 'is_basic': bool}
+    week_status = {}
     
     for wk, dlist in weeks.items():
         monday = min(dlist) - timedelta(days=min(dlist).weekday())
@@ -289,7 +317,6 @@ def settle_longterm_bonus(db, oid):
         if target_kind:
             db.execute("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", (f"W:{wk}", oid, target_kind, target_pts, bj_now().isoformat()))
 
-    # 2. 再进行月结算（带周豁免逻辑）
     months = {}
     for ds in scores:
         d = date.fromisoformat(ds); y, m = d.year, d.month
@@ -305,7 +332,6 @@ def settle_longterm_bonus(db, oid):
             alldays.append(cur)
             cur += timedelta(days=1)
             
-        # 月内不全有记录，不算月奖
         if not all(x.isoformat() in scores for x in alldays): continue
         
         month_is_perfect = True
@@ -321,9 +347,7 @@ def settle_longterm_bonus(db, oid):
             day_full = day_data["base_score"] >= (day_data.get("full_thr") or 999)
             day_basic = day_data["base_score"] >= (day_data.get("basic_thr") or 999)
             
-            # 如果这天没满分，但它所在的周是完美周（意味着已豁免），月完美判定依然通过
             if not day_full and not w_stat['is_perfect']: month_is_perfect = False
-            # 如果这天没达标，但它所在的周是达标周（意味着已豁免），月达标判定依然通过
             if not day_basic and not w_stat['is_basic']: month_is_basic = False
 
         target_kind, target_pts = None, 0.0
@@ -384,6 +408,126 @@ def save_day(db, day: date, done_ids: list[str], oid: str):
     db.commit()
     recalc_all_bonus(db, oid)
     settle_longterm_bonus(db, oid)
+
+# ================= 动态徽章判定逻辑 =================
+def get_user_badges(db, oid):
+    configs = get_badge_configs(db)
+    earned = []
+    
+    # 获取用户各项指标
+    days_count = db.execute("SELECT COUNT(*) as c FROM daily_records WHERE owner_id=?", (oid,)).fetchone()["c"]
+    bal = get_balance(db, oid)
+    total_earned = bal['balance'] + bal['spent']
+    perfect_count = db.execute("SELECT COUNT(*) as c FROM period_bonus WHERE owner_id=? AND (kind LIKE '%完美%')", (oid,)).fetchone()["c"]
+    
+    # 解析单次考试达成最高科目数
+    max_exam_hits = 0
+    exam_rewards = db.execute("SELECT detail FROM exam_rewards WHERE owner_id=?", (oid,)).fetchall()
+    for er in exam_rewards:
+        match = re.search(r'达成 (\d+) 门', er["detail"])
+        if match:
+            hits = int(match.group(1))
+            if hits > max_exam_hits: max_exam_hits = hits
+    
+    for cfg in configs:
+        cond_type = cfg["cond_type"]
+        cond_val = float(cfg["cond_val"])
+        is_hit = False
+        
+        if cond_type == 'days' and days_count >= cond_val: is_hit = True
+        elif cond_type == 'points' and total_earned >= cond_val: is_hit = True
+        elif cond_type == 'perfect' and perfect_count >= cond_val: is_hit = True
+        elif cond_type == 'exam_hits' and max_exam_hits >= cond_val: is_hit = True
+        
+        if is_hit:
+            earned.append({"name": cfg["name"], "icon": cfg["icon_url"]})
+            
+    return earned
+
+# ================= 前端计时器组件 =================
+def render_timer():
+    timer_html = """
+    <style>
+        .timer-container { font-family: sans-serif; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 10px; }
+        .timer-display { font-size: 40px; font-weight: bold; margin: 10px 0; color: #2c3e50; }
+        .btn-group { display: flex; justify-content: center; gap: 10px; margin-top: 10px; flex-wrap: wrap;}
+        button { padding: 8px 15px; font-size: 14px; cursor: pointer; border: none; border-radius: 5px; background: #007bff; color: white; transition: 0.2s; }
+        button:hover { background: #0056b3; }
+        .btn-stop { background: #dc3545; } .btn-stop:hover { background: #c82333; }
+        .btn-reset { background: #6c757d; } .btn-reset:hover { background: #5a6268; }
+        input[type="number"] { padding: 5px; width: 60px; font-size: 14px; margin: 0 5px; }
+    </style>
+    <div class="timer-container">
+        <div class="timer-display" id="display">00:00</div>
+        <div style="margin-bottom: 10px;">
+            模式: 
+            <select id="mode" style="padding:5px; border-radius:5px;">
+                <option value="stopwatch">正计时</option>
+                <option value="countdown">倒计时</option>
+            </select>
+            设定: <input type="number" id="minutes" value="25" min="1"> 分钟
+        </div>
+        <div class="btn-group">
+            <button onclick="startTimer()">开始</button>
+            <button class="btn-stop" onclick="stopTimer()">暂停</button>
+            <button class="btn-reset" onclick="resetTimer()">重置</button>
+        </div>
+    </div>
+    <script>
+        let timerId = null;
+        let isRunning = false;
+        let totalSeconds = 0;
+        let currentSeconds = 0;
+        
+        function updateDisplay() {
+            let m = Math.floor(currentSeconds / 60).toString().padStart(2, '0');
+            let s = (currentSeconds % 60).toString().padStart(2, '0');
+            document.getElementById('display').innerText = m + ":" + s;
+        }
+        
+        function startTimer() {
+            if(isRunning) return;
+            let mode = document.getElementById('mode').value;
+            if(!isRunning && currentSeconds === 0) {
+                if(mode === 'countdown') {
+                    let mins = document.getElementById('minutes').value;
+                    totalSeconds = mins * 60;
+                    currentSeconds = totalSeconds;
+                } else {
+                    totalSeconds = 0;
+                    currentSeconds = 0;
+                }
+            }
+            isRunning = true;
+            timerId = setInterval(() => {
+                if(document.getElementById('mode').value === 'stopwatch') {
+                    currentSeconds++;
+                } else {
+                    if(currentSeconds > 0) currentSeconds--;
+                    else {
+                        clearInterval(timerId); isRunning = false;
+                        alert("时间到！"); return;
+                    }
+                }
+                updateDisplay();
+            }, 1000);
+        }
+        
+        function stopTimer() {
+            clearInterval(timerId);
+            isRunning = false;
+        }
+        
+        function resetTimer() {
+            clearInterval(timerId);
+            isRunning = false;
+            currentSeconds = 0;
+            updateDisplay();
+        }
+        updateDisplay();
+    </script>
+    """
+    return components.html(timer_html, height=220)
 
 # ================= 页面渲染 =================
 def login_page(db):
@@ -468,6 +612,24 @@ def main():
         bal = get_balance(db, view_as)
         st.metric("当前可用积分", f"{bal['balance']:.1f}")
         
+        with st.expander("专注计时器 (番茄钟)", expanded=False):
+            render_timer()
+        
+        with st.expander("我的成就徽章"):
+            user_badges = get_user_badges(db, view_as)
+            if user_badges:
+                for i in range(0, len(user_badges), 3):
+                    cols = st.columns(3)
+                    for j in range(3):
+                        if i + j < len(user_badges):
+                            b = user_badges[i+j]
+                            with cols[j]:
+                                # 为图片容器加上统一高度避免错位
+                                st.markdown(f'<div style="height:70px; display:flex; align-items:center; justify-content:center;"><img src="{b["icon"]}" width="60"></div>', unsafe_allow_html=True)
+                                st.caption(f"<center>{b['name']}</center>", unsafe_allow_html=True)
+            else:
+                st.caption("暂无徽章，快去打卡吧！")
+
         with st.expander("积分明细"):
             st.write(f"打卡：{bal['daily']:.1f} | 长期：{bal['period']:.1f}")
             st.write(f"考试：{bal['exam']:.1f} | 偶发：{bal['extra']:.1f}")
@@ -503,7 +665,7 @@ def main():
                 del st.session_state.role
                 st.rerun()
 
-    tabs = ["打卡", "偶发", "历史", "商城", "兑换", "考试", "事件", "系统设置"]
+    tabs = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件", "系统设置"]
     tab_objs = st.tabs(tabs)
 
     with tab_objs[0]:
@@ -566,7 +728,34 @@ def main():
         else: st.caption("暂无记录")
 
     with tab_objs[2]:
-        st.subheader("历史记录")
+        st.subheader("历史与图表分析")
+        all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
+        if all_recs:
+            df_chart = pd.DataFrame([{"日期": r["day"], "总分": r["total_score"]} for r in all_recs])
+            df_chart["日期"] = pd.to_datetime(df_chart["日期"])
+            
+            st.markdown("**每日得分走势**")
+            line_chart = alt.Chart(df_chart).mark_line(point=True).encode(
+                x=alt.X('日期:T', title='日期'),
+                y=alt.Y('总分:Q', title='当日总分'),
+                tooltip=['日期:T', '总分:Q']
+            ).interactive()
+            st.altair_chart(line_chart, use_container_width=True)
+            
+            st.markdown("**打卡活跃度 (日历图)**")
+            df_chart["星期"] = df_chart["日期"].dt.day_name()
+            heatmap = alt.Chart(df_chart).mark_rect().encode(
+                x=alt.X('yearmonth(日期):O', title='月份'),
+                y=alt.Y('date(日期):O', title='日期'),
+                color=alt.Color('总分:Q', scale=alt.Scale(scheme='greens')),
+                tooltip=['日期:T', '总分:Q']
+            )
+            st.altair_chart(heatmap, use_container_width=True)
+        else:
+            st.info("暂无打卡数据，快去打卡吧！")
+            
+        st.divider()
+        st.subheader("历史打卡详情")
         days = [r["day"] for r in db.execute("SELECT day FROM daily_records WHERE owner_id=? ORDER BY day DESC", (view_as,)).fetchall()]
         if days:
             sel = st.selectbox("选择日期", days)
@@ -672,16 +861,9 @@ def main():
         
         df_exam_data = []
         for k, v in exam_config.items():
-            df_exam_data.append({
-                "科目": k, 
-                "类型": v["type"], 
-                "目标": str(v["target"]), 
-                "分差": v.get("step", 0), 
-                "单档奖励": v["step_points"]
-            })
+            df_exam_data.append({"科目": k, "类型": v["type"], "目标": str(v["target"]), "分差": v.get("step", 0), "单档奖励": v["step_points"]})
         df_exam = pd.DataFrame(df_exam_data)
-        if df_exam.empty:
-            df_exam = pd.DataFrame(columns=["科目", "类型", "目标", "分差", "单档奖励"])
+        if df_exam.empty: df_exam = pd.DataFrame(columns=["科目", "类型", "目标", "分差", "单档奖励"])
 
         edited_exam = st.data_editor(
             df_exam,
@@ -692,9 +874,7 @@ def main():
                 "分差": st.column_config.NumberColumn("分差", min_value=0.0, step=1.0, help="仅分数模式有效"),
                 "单档奖励": st.column_config.NumberColumn("单档奖励", min_value=0.0, step=0.5)
             },
-            num_rows="dynamic", 
-            use_container_width=True, 
-            key=f"edit_exam_{view_as}"
+            num_rows="dynamic", use_container_width=True, key=f"edit_exam_{view_as}"
         )
         
         if st.button("保存考试科目修改"):
@@ -702,32 +882,18 @@ def main():
             has_error = False
             for _, row in edited_exam.iterrows():
                 if pd.notna(row["科目"]) and row["科目"]:
-                    sub = row["科目"]
-                    e_type = str(row["类型"]).strip().lower()
-                    e_target = str(row["目标"]).strip()
-                    
-                    if e_type not in ["score", "grade"]:
-                        st.error(f"科目 {sub} 的类型必须是 score 或 grade")
-                        has_error = True; break
-                    
+                    sub = row["科目"]; e_type = str(row["类型"]).strip().lower(); e_target = str(row["目标"]).strip()
+                    if e_type not in ["score", "grade"]: st.error(f"科目 {sub} 类型错误"); has_error = True; break
                     if e_type == "score":
                         try: e_target_val = float(e_target)
-                        except ValueError:
-                            st.error(f"科目 {sub} 选了 score，目标必须是数字")
-                            has_error = True; break
+                        except ValueError: st.error(f"科目 {sub} 目标必须是数字"); has_error = True; break
                         cfg = {"type": "score", "target": e_target_val, "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
                     else:
-                        if e_target not in GRADES:
-                            st.error(f"科目 {sub} 选了 grade，目标必须在这11档内: {', '.join(GRADES)}")
-                            has_error = True; break
+                        if e_target not in GRADES: st.error(f"科目 {sub} 目标必须在 11 档内"); has_error = True; break
                         cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
-                        
                     db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
-            
-            if has_error:
-                db.commit()
-            else:
-                db.commit(); st.success("科目已更新！"); st.rerun()
+            if has_error: db.commit()
+            else: db.commit(); st.success("科目已更新！"); st.rerun()
 
         st.divider()
         st.markdown("### 4. 修改多科达成奖励")
@@ -742,7 +908,6 @@ def main():
 
         st.divider()
         st.markdown("### 5. 修改阈值与 Bonus 规则 (老数据不受影响)")
-        st.info("💡 提示：修改新规则后，只会对**未来**的打卡生效。已经打过的卡依然按当时的分数标准结算。")
         thresholds = get_thresholds(db, view_as); bonus_rules = get_bonus_rules(db, view_as)
         with st.form(f"bonus_form_{view_as}"):
             t_cols = st.columns(7); t_inputs = {}
@@ -781,26 +946,63 @@ def main():
                     "weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}}, 
                     "weekend": {"single": {"points": we_single, "full_points": we_single_full}}, 
                     "longterm": {
-                        "week_basic": lt_wb, "week_full": lt_wf, 
-                        "month_basic": lt_mb, "month_full": lt_mf,
-                        "week_flex_perfect_deduct": flex_p,
-                        "week_flex_basic_deduct": flex_b
+                        "week_basic": lt_wb, "week_full": lt_wf, "month_basic": lt_mb, "month_full": lt_mf,
+                        "week_flex_perfect_deduct": flex_p, "week_flex_basic_deduct": flex_b
                     }
                 }
                 db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
                 db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
-                db.commit(); 
-                st.success("✅ 新标准已启用！未来打卡生效。"); st.rerun()
+                db.commit(); st.success("✅ 新标准已启用！未来打卡生效。"); st.rerun()
+
+        st.divider()
+        # ================= 新增：AI 徽章管理 =================
+        st.markdown("### 6. 全局徽章配置与 AI 生成 (仅管理员可操作)")
+        if current_role != "admin":
+            st.info("全局徽章由管理员统一配置，普通用户无法修改。")
+        else:
+            st.write("你可以为全站用户添加通用的成就徽章。输入名称后，系统会调用 AI 自动绘制符合含义的扁平化图标。")
+            
+            with st.form("add_badge_form"):
+                c1, c2, c3 = st.columns([3, 2, 2])
+                b_name = c1.text_input("徽章名称 (如：早起鸟、自律达人)")
+                b_type = c2.selectbox("达成条件", options=["days", "points", "perfect", "exam_hits"], format_func=lambda x: {"days": "累计打卡天数", "points": "累计赚取积分", "perfect": "完美周/月次数", "exam_hits": "单次考试达成科目数"}[x])
+                b_val = c3.number_input("达成数值", min_value=1.0, step=1.0)
+                
+                if st.form_submit_button("✨ AI 生成并添加全局徽章", type="primary"):
+                    if b_name:
+                        # 调用开源免费 AI 绘图接口，使用随机 Seed 确保新生成的不一样
+                        seed = random.randint(1, 99999)
+                        prompt = f"Minimalist flat vector icon for '{b_name}', clean simple design, ui app icon, no text, white background, not exaggerated."
+                        encoded_prompt = urllib.parse.quote(prompt)
+                        icon_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=256&height=256&nologo=true&seed={seed}"
+                        
+                        db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (b_name, b_type, b_val, icon_url))
+                        db.commit()
+                        st.success(f"全局徽章「{b_name}」已生成并配置！(AI 图片生成可能需几秒加载)")
+                        st.rerun()
+            
+            # 现有的全局徽章列表及删除
+            st.markdown("**当前全局已配置的徽章：**")
+            existing_badges = get_badge_configs(db)
+            if existing_badges:
+                for b in existing_badges:
+                    c1, c2, c3, c4 = st.columns([2, 3, 3, 2])
+                    with c1:
+                        st.markdown(f'<img src="{b["icon_url"]}" width="50">', unsafe_allow_html=True)
+                    c2.write(f"**{b['name']}**")
+                    type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}[b["cond_type"]]
+                    c3.write(f"条件：{type_cn} ≥ {b['cond_val']}")
+                    if c4.button("删除", key=f"del_badge_{b['id']}"):
+                        db.execute("DELETE FROM config_badges WHERE id=?", (b["id"],))
+                        db.commit(); st.rerun()
+            else:
+                st.caption("暂无全局自定义徽章。")
 
         if current_role == "admin":
             st.divider()
-            st.markdown("### 6. 用户管理与权限控制 (管理员专属)")
-            st.write("你可以在此提升或降级任何用户的权限。*(提示：降级自己后，你将失去管理员特权)*")
-            
+            st.markdown("### 7. 用户管理与权限控制")
             for u in all_users_data:
-                uname = u["username"]
-                urole = u["role"]
-                
+                uname = u["username"]; urole = u["role"]
                 c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
                 c1.write(f"用户：**{uname}**")
                 
