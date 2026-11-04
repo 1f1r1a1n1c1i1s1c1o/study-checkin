@@ -77,7 +77,7 @@ DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_po
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
 GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
-# ================= 数据库封装 =================
+# ================= 数据库封装（加入批量执行提速） =================
 class SqliteCursor:
     def __init__(self, cur):
         self._cur = cur
@@ -102,7 +102,6 @@ class DBWrapper:
     def execute(self, query, params=()):
         try:
             if self.is_cloud:
-                # 检查连接是否已关闭，如果已关闭则抛错触发重连
                 if self.conn.closed != 0:
                     raise psycopg2.OperationalError("Connection closed")
                 query = query.replace("?", "%s")
@@ -123,10 +122,25 @@ class DBWrapper:
                 raw = self.conn.execute(query, params)
                 return SqliteCursor(raw)
         except (psycopg2.OperationalError, sqlite3.OperationalError) as e:
-            # 云端断网或休眠自愈机制
             if self.is_cloud and "Connection closed" in str(e):
                 st.cache_resource.clear()
             raise RuntimeError(f"数据库网络波动，请刷新页面重试。({str(e)})")
+    
+    def executemany(self, query, params_list):
+        """新增：批量执行，极大地提升循环 UPDATE/INSERT 的速度"""
+        try:
+            if self.is_cloud:
+                if self.conn.closed != 0:
+                    raise psycopg2.OperationalError("Connection closed")
+                query = query.replace("?", "%s")
+                cur = self.conn.cursor()
+                cur.executemany(query, params_list)
+                return cur
+            else:
+                return self.conn.executemany(query, params_list)
+        except (psycopg2.OperationalError, sqlite3.OperationalError) as e:
+            raise RuntimeError(f"数据库批量操作失败。({str(e)})")
+
     def commit(self):
         self.conn.commit()
 
@@ -169,6 +183,18 @@ def init_db(db):
     ]
     for t in tables:
         try: db.execute(t)
+        except: pass
+        
+    # 建立数据库索引，极大地加快查询速度
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_daily_records ON daily_records (owner_id, day)",
+        "CREATE INDEX IF NOT EXISTS idx_period_bonus ON period_bonus (owner_id)",
+        "CREATE INDEX IF NOT EXISTS idx_extra_points ON extra_points (owner_id)",
+        "CREATE INDEX IF NOT EXISTS idx_exam_rewards ON exam_rewards (owner_id)",
+        "CREATE INDEX IF NOT EXISTS idx_redemptions ON redemptions (owner_id)"
+    ]
+    for idx in indexes:
+        try: db.execute(idx)
         except: pass
     db.commit()
 
@@ -288,10 +314,12 @@ def init_old_admin_data(db, owner_id):
     db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_BONUS_RULES)))
     db.commit()
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_users(db):
     return [{"username": r["username"], "role": r["role"]} for r in db.execute("SELECT username, role FROM users").fetchall()]
 
 # ================= 三级权限 =================
+@st.cache_data(ttl=60, show_spinner=False)
 def get_visible_users(db, current_user, current_role):
     if current_role == "admin":
         return [u["username"] for u in get_all_users(db)]
@@ -395,6 +423,7 @@ def get_balance(oid) -> dict:
         "balance": round(daily + period + exam + special + extra - spent, 2)
     }
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_makeup_cards_of(username):
     try:
         db = get_db()
@@ -466,40 +495,51 @@ def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict):
     return float(bonus), {"tier": "weekend_single"}
 
 def recalc_all_bonus(db, oid):
+    """【性能重构】：不再全表重算，只针对最近 30 天批量重算。"""
     try:
         bonus_rules = get_bonus_rules(oid)
-        rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
+        start_d = (get_user_today(8.0) - timedelta(days=30)).isoformat()
+        rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=? AND day >= ?", (oid, start_d)).fetchall()
+        if not rows: return
+        
         lookup = {r["day"]: {"base_score": float(r["base_score"] or 0), "basic_thr": float(r.get("basic_thr") or 0), "full_thr": float(r.get("full_thr") or 0)} for r in rows}
+        updates = []
         for day_str in sorted(lookup):
             try: d = date.fromisoformat(day_str)
             except ValueError: continue
             bonus, detail = compute_bonus_for_day(d, lookup, bonus_rules)
-            db.execute(
-                "UPDATE daily_records SET bonus_score=?, bonus_detail=?, total_score=? WHERE day=? AND owner_id=?",
-                (bonus, json.dumps(detail), float(lookup[day_str]["base_score"]) + bonus, day_str, oid)
-            )
-        db.commit()
+            updates.append((bonus, json.dumps(detail), float(lookup[day_str]["base_score"]) + bonus, day_str, oid))
+        
+        # 批量提交，速度起飞
+        if updates:
+            db.executemany("UPDATE daily_records SET bonus_score=?, bonus_detail=?, total_score=? WHERE day=? AND owner_id=?", updates)
+            db.commit()
     except Exception: pass
 
 def settle_longterm_bonus(db, oid, ts):
+    """【性能重构】：不再全表重算，只针对最近 60 天的周/月批量结算。"""
     try:
         bonus_rules = get_bonus_rules(oid); lt_rules = bonus_rules["longterm"]
-        rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (oid,)).fetchall()
+        start_d = (get_user_today(8.0) - timedelta(days=60)).isoformat()
+        rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=? AND day >= ?", (oid, start_d)).fetchall()
+        if not rows: return
+
         scores = {}
         for r in rows:
             try: date.fromisoformat(r["day"])
             except ValueError: continue
             scores[r["day"]] = r
 
+        # 清理旧奖励
         db.execute("DELETE FROM period_bonus WHERE owner_id=?", (oid,))
-        if not scores:
-            db.commit(); return
-
+        
         weeks = {}
         for ds in scores:
             d = date.fromisoformat(ds); y, w, _ = d.isocalendar()
             weeks.setdefault(f"{y}-W{w:02d}", []).append(d)
         week_status = {}
+        inserts = []
+        
         for wk, dlist in weeks.items():
             monday = min(dlist) - timedelta(days=min(dlist).weekday())
             full_week = [monday + timedelta(days=i) for i in range(7)]
@@ -523,15 +563,13 @@ def settle_longterm_bonus(db, oid, ts):
                 is_basic = True; target_kind = "整周达标(弹性1天)"; target_pts = max(0, lt_rules["week_basic"] - lt_rules.get("week_flex_basic_deduct", 0.5))
             week_status[wk] = {'is_perfect': is_perfect, 'is_basic': is_basic}
             if target_kind:
-                db.execute(
-                    "INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)",
-                    (f"W:{wk}", oid, target_kind, target_pts, ts)
-                )
+                inserts.append((f"W:{wk}", oid, target_kind, target_pts, ts))
 
         months = {}
         for ds in scores:
             d = date.fromisoformat(ds); y, m = d.year, d.month
             months.setdefault(f"{y}-{m:02d}", []).append(d)
+            
         for mk, dlist in months.items():
             y, m = int(mk.split("-")[0]), int(mk.split("-")[1])
             first = date(y, m, 1)
@@ -553,10 +591,10 @@ def settle_longterm_bonus(db, oid, ts):
             if month_is_perfect: target_kind = "完美一月"; target_pts = lt_rules["month_full"]
             elif month_is_basic: target_kind = "整月达标"; target_pts = lt_rules["month_basic"]
             if target_kind:
-                db.execute(
-                    "INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)",
-                    (f"M:{mk}", oid, target_kind, target_pts, ts)
-                )
+                inserts.append((f"M:{mk}", oid, target_kind, target_pts, ts))
+                
+        if inserts:
+            db.executemany("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", inserts)
         db.commit()
     except Exception: pass
 
@@ -878,7 +916,6 @@ def main():
         if view_as not in visible_users:
             view_as = current_user
 
-        # 【安全修复 1】：统一获取 target 的时区，防止 Admin 帮别人打卡时，由于时区不同导致记录到错误的日期
         try:
             target_urow = db.execute("SELECT timezone_offset FROM users WHERE username=?", (view_as,)).fetchone()
             target_tz = target_urow.get("timezone_offset") if target_urow else 8.0
@@ -1256,7 +1293,6 @@ def main():
                         cc1, cc2 = st.columns(2)
                         if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", type="primary", use_container_width=True):
                             try:
-                                # 【安全修复 3】：后端二次校验余额，防止前端篡改或并发导致的恶意透支
                                 curr_bal = get_balance(view_as)
                                 if curr_bal["balance"] < cost:
                                     st.error("积分不足，兑换失败。")
