@@ -14,7 +14,6 @@ if IS_CLOUD:
 else:
     import sqlite3
 
-
 # ================= 兼容性封装 =================
 def _submit(label, **kwargs):
     """form_submit_button 兼容封装：新版走 width='stretch'，旧版回退 use_container_width。"""
@@ -22,7 +21,6 @@ def _submit(label, **kwargs):
         return st.form_submit_button(label, width="stretch", **kwargs)
     except TypeError:
         return st.form_submit_button(label, use_container_width=True, **kwargs)
-
 
 # ================= 密码与安全区 =================
 def hash_pwd_sha256(pwd: str) -> str:
@@ -37,7 +35,6 @@ def check_pwd_bcrypt(pwd: str, hashed: str) -> bool:
     except ValueError:
         return False
 
-
 # ================= 时间引擎 =================
 TIMEZONES = {
     "北京时间 (UTC+8)": 8.0,
@@ -50,7 +47,6 @@ TIMEZONES = {
     "自定义时区": None
 }
 
-
 def get_user_now(offset_hours: float) -> datetime:
     try:
         oh = float(offset_hours)
@@ -60,10 +56,8 @@ def get_user_now(offset_hours: float) -> datetime:
     tz = timezone(timedelta(hours=oh))
     return datetime.now(tz)
 
-
 def get_user_today(offset_hours: float) -> date:
     return get_user_now(offset_hours).date()
-
 
 DB_PATH = Path(__file__).resolve().parent / "study_points.db"
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -84,7 +78,6 @@ DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_po
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
 GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
-
 # ================= 数据库封装 =================
 class SqliteCursor:
     """sqlite3 结果统一转 dict，与云端 RealDictCursor 行为一致。"""
@@ -103,7 +96,6 @@ class SqliteCursor:
         return [dict(r) for r in self._cur.fetchall()]
     def __iter__(self):
         return (dict(r) for r in self._cur)
-
 
 class DBWrapper:
     def __init__(self, conn, is_cloud):
@@ -134,7 +126,6 @@ class DBWrapper:
     def commit(self):
         self.conn.commit()
 
-
 @st.cache_resource(show_spinner=False)
 def get_db():
     if IS_CLOUD:
@@ -149,7 +140,6 @@ def get_db():
         db = DBWrapper(conn, False)
         init_db(db)
         return db
-
 
 def init_db(db):
     tables = [
@@ -273,7 +263,6 @@ def init_db(db):
         db.commit()
     except Exception: pass
 
-
 def init_old_admin_data(db, owner_id):
     DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
     DEFAULT_SHOP = [("专属夸夸", 6)]
@@ -291,14 +280,11 @@ def init_old_admin_data(db, owner_id):
     db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_BONUS_RULES)))
     db.commit()
 
-
 def get_all_users(db):
     return [{"username": r["username"], "role": r["role"]} for r in db.execute("SELECT username, role FROM users").fetchall()]
 
-
-# ================= 三级权限：可见用户 =================
+# ================= 三级权限 =================
 def get_visible_users(db, current_user, current_role):
-    """admin: 全部；host: 自己 + host_id=自己的；user: 自己。"""
     if current_role == "admin":
         return [u["username"] for u in get_all_users(db)]
     if current_role == "host":
@@ -309,9 +295,7 @@ def get_visible_users(db, current_user, current_role):
         return [r["username"] for r in rows]
     return [current_user]
 
-
 def _remaining_admins(db, exclude_username):
-    """剩余 admin 数量（不含 exclude_username）。用于唯一 admin 保护。"""
     try:
         return db.execute(
             "SELECT COUNT(*) as c FROM users WHERE role='admin' AND username != ?",
@@ -320,13 +304,11 @@ def _remaining_admins(db, exclude_username):
     except Exception:
         return 0
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_thresholds(oid):
     db = get_db()
     rows = db.execute("SELECT * FROM config_thresholds WHERE owner_id=?", (oid,)).fetchall()
     return {r["weekday"]: {"basic": r["basic"], "full": r["full"]} for r in rows}
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_bonus_rules(oid):
@@ -338,13 +320,11 @@ def get_bonus_rules(oid):
     if "week_flex_basic_deduct" not in rules["longterm"]: rules["longterm"]["week_flex_basic_deduct"] = 0.5
     return rules
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_tasks(weekday, oid):
     db = get_db()
     rows = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=?", (weekday, oid)).fetchall()
     return [{"id": r["id"], "category": r["category"], "name": r["name"], "points": r["points"]} for r in rows]
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_shop(oid):
@@ -354,7 +334,6 @@ def get_shop(oid):
         items.insert(0, ("补签卡", 25))
     return items
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_exam_config(oid):
     db = get_db()
@@ -362,35 +341,52 @@ def get_exam_config(oid):
     rule_row = db.execute("SELECT config_json FROM config_exam_rules WHERE owner_id=?", (oid,)).fetchone()
     return subjects, json.loads(rule_row["config_json"]) if rule_row else DEFAULT_EXAM_RULES
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_exam_multihit(oid):
     db = get_db()
     return [{"hit_count": r["hit_count"], "points": r["points"]}
             for r in db.execute("SELECT * FROM config_exam_multihit WHERE owner_id=? ORDER BY hit_count ASC", (oid,)).fetchall()]
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_badge_configs():
     db = get_db()
     return [dict(r) for r in db.execute("SELECT * FROM config_badges WHERE owner_id='system' ORDER BY id ASC").fetchall()]
 
-
 @st.cache_data(ttl=10, show_spinner=False)
 def get_balance(oid) -> dict:
     db = get_db()
-    daily = db.execute("SELECT COALESCE(SUM(total_score),0) as s FROM daily_records WHERE owner_id=?", (oid,)).fetchone()["s"]
-    period = db.execute("SELECT COALESCE(SUM(points),0) as s FROM period_bonus WHERE owner_id=?", (oid,)).fetchone()["s"]
-    exam = db.execute("SELECT COALESCE(SUM(points),0) as s FROM exam_rewards WHERE owner_id=?", (oid,)).fetchone()["s"]
-    special = db.execute("SELECT COALESCE(SUM(points),0) as s FROM special_events WHERE owner_id=?", (oid,)).fetchone()["s"]
-    spent = db.execute("SELECT COALESCE(SUM(cost),0) as s FROM redemptions WHERE owner_id=?", (oid,)).fetchone()["s"]
-    extra = db.execute("SELECT COALESCE(SUM(points),0) as s FROM extra_points WHERE owner_id=?", (oid,)).fetchone()["s"]
-    return {
-        "daily": round(float(daily), 2), "period": round(float(period), 2), "exam": round(float(exam), 2),
-        "special": round(float(special), 2), "spent": round(float(spent), 2), "extra": round(float(extra), 2),
-        "balance": round(float(daily) + float(period) + float(exam) + float(special) + float(extra) - float(spent), 2)
-    }
+    # 优化：使用 UNION ALL 一次性查出所有数据，避免 6 次网络往返
+    query = """
+        SELECT 'daily' as k, COALESCE(SUM(total_score), 0) as s FROM daily_records WHERE owner_id = ?
+        UNION ALL
+        SELECT 'period', COALESCE(SUM(points), 0) FROM period_bonus WHERE owner_id = ?
+        UNION ALL
+        SELECT 'exam', COALESCE(SUM(points), 0) FROM exam_rewards WHERE owner_id = ?
+        UNION ALL
+        SELECT 'special', COALESCE(SUM(points), 0) FROM special_events WHERE owner_id = ?
+        UNION ALL
+        SELECT 'spent', COALESCE(SUM(cost), 0) FROM redemptions WHERE owner_id = ?
+        UNION ALL
+        SELECT 'extra', COALESCE(SUM(points), 0) FROM extra_points WHERE owner_id = ?
+    """
+    try:
+        rows = db.execute(query, (oid, oid, oid, oid, oid, oid)).fetchall()
+        data = {r["k"]: float(r["s"]) for r in rows}
+    except Exception:
+        data = {"daily": 0.0, "period": 0.0, "exam": 0.0, "special": 0.0, "spent": 0.0, "extra": 0.0}
 
+    daily = round(data["daily"], 2)
+    period = round(data["period"], 2)
+    exam = round(data["exam"], 2)
+    special = round(data["special"], 2)
+    spent = round(data["spent"], 2)
+    extra = round(data["extra"], 2)
+    
+    return {
+        "daily": daily, "period": period, "exam": exam,
+        "special": special, "spent": spent, "extra": extra,
+        "balance": round(daily + period + exam + special + extra - spent, 2)
+    }
 
 def get_makeup_cards_of(username):
     """读取指定用户的补签卡数量（不存在则 0）。"""
@@ -402,7 +398,6 @@ def get_makeup_cards_of(username):
         return int(dict(row).get("makeup_cards") or 0)
     except Exception:
         return 0
-
 
 @st.cache_data(ttl=10, show_spinner=False)
 def get_user_badges(oid):
@@ -432,7 +427,6 @@ def get_user_badges(oid):
                 earned.append({"name": html.escape(cfg["name"]), "icon": html.escape(cfg["icon_url"] or "", quote=True)})
         except Exception: continue
     return earned
-
 
 def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict):
     key = day.isoformat(); rec = lookup.get(key)
@@ -465,7 +459,6 @@ def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict):
     bonus = rule["full_points"] if base >= full_thr else rule["points"]
     return float(bonus), {"tier": "weekend_single"}
 
-
 def recalc_all_bonus(db, oid):
     try:
         bonus_rules = get_bonus_rules(oid)
@@ -480,7 +473,6 @@ def recalc_all_bonus(db, oid):
             )
         db.commit()
     except Exception: pass
-
 
 def settle_longterm_bonus(db, oid, ts):
     try:
@@ -556,7 +548,6 @@ def settle_longterm_bonus(db, oid, ts):
         db.commit()
     except Exception: pass
 
-
 def save_day(db, day: date, done_ids: list, oid: str, ts: str):
     tasks = get_tasks(day.weekday(), oid)
     base = sum(t["points"] for t in tasks if t["id"] in set(done_ids))
@@ -570,7 +561,6 @@ def save_day(db, day: date, done_ids: list, oid: str, ts: str):
     recalc_all_bonus(db, oid)
     settle_longterm_bonus(db, oid, ts)
     st.cache_data.clear()
-
 
 def calc_exam_bonus(scores: dict, ranks: dict, oid: str):
     try:
@@ -614,7 +604,6 @@ def calc_exam_bonus(scores: dict, ranks: dict, oid: str):
                 gain = extra * exam_rules.get("rank_step_points", 1.5); total += gain
                 lines.append(f"  再进{extra}档 -> +{gain}")
     return round(total, 2), lines, hit_count
-
 
 def render_timer():
     timer_html = """
@@ -679,7 +668,6 @@ def render_timer():
     except AttributeError:
         import streamlit.components.v1 as components
         components.html(timer_html, height=220)
-
 
 def login_page(db):
     st.title("学习打卡系统")
@@ -796,7 +784,6 @@ def main():
     except RuntimeError as e:
         st.error(str(e)); st.stop()
 
-    # 需求 9：确保 host_id 字段在本地 sqlite3.Row 下也能安全读取
     try:
         _ = dict(user_row).get("host_id")
     except Exception:
@@ -879,7 +866,6 @@ def main():
         if view_as not in visible_users:
             view_as = current_user
 
-        # 改动 1A：显示 view_as 的补签卡（不是 current_user 的）
         view_makeup_sidebar = get_makeup_cards_of(view_as)
 
         role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
@@ -910,7 +896,8 @@ def main():
                                         f'<img src="{b["icon"]}" width="60" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'">'
                                         f'</div>', unsafe_allow_html=True
                                     )
-                                    st.caption(f"<center>{b['name']}</center>", unsafe_allow_html=True)
+                                    # 兼容性优化：使用 div 替代 center 标签
+                                    st.markdown(f"<div style='text-align: center; font-size: 14px;'>{b['name']}</div>", unsafe_allow_html=True)
                 else:
                     st.caption("暂无徽章。")
 
@@ -1130,7 +1117,6 @@ def main():
     if "历史与图表" in tab_dict:
         with tab_dict["历史与图表"]:
             st.subheader("历史与图表分析")
-            # 改动 1A：显示 view_as 的补签卡
             view_makeup_hist = get_makeup_cards_of(view_as)
             if view_makeup_hist > 0:
                 st.markdown(f"🎫 **当前配置对象有 {view_makeup_hist} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
@@ -1148,7 +1134,6 @@ def main():
                         selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
                         if _submit("使用 1 张补签卡并提交", type="primary"):
                             try:
-                                # 改动 1A：扣 view_as 的卡
                                 cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (view_as,))
                                 db.commit()
                                 if cur.rowcount > 0:
@@ -1251,7 +1236,6 @@ def main():
                         cc1, cc2 = st.columns(2)
                         if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", type="primary"):
                             try:
-                                # 改动 1A：补签卡加到 view_as 上（与积分扣减口径一致）
                                 if name == "补签卡":
                                     db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
                                 db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
@@ -1514,7 +1498,7 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
-            # ---- 5. 修改阈值与 Bonus 规则（文案修正，不触发重算） ----
+            # ---- 5. 修改阈值与 Bonus 规则 ----
             st.divider()
             st.markdown("### 5. 修改阈值与 Bonus 规则（阈值与 Bonus 规则下次打卡时生效）")
             try:
@@ -1579,7 +1563,7 @@ def main():
                     except RuntimeError as e:
                         st.error(str(e))
 
-            # ---- 6. 全局徽章配置（仅 admin 可操作，host 看到提示） ----
+            # ---- 6. 全局徽章配置 ----
             st.divider()
             st.markdown("### 6. 全局徽章配置与 AI 生成")
             if current_role == "admin":
@@ -1625,7 +1609,7 @@ def main():
             else:
                 st.info("全局徽章由管理员配置。")
 
-            # ---- 7. 用户管理与权限控制（仅 admin） ----
+            # ---- 7. 用户管理与权限控制 ----
             if current_role == "admin":
                 st.divider()
                 st.markdown("### 7. 用户管理与权限控制")
@@ -1732,7 +1716,6 @@ def main():
                         pending_key = f"pending_del_{uname}"
                         if st.session_state.get(pending_key):
                             st.warning(f"确认删除用户 **{html.escape(uname)}**？此操作不可撤销。")
-                            # 不区分 role：查该用户名下绑了多少 user
                             try:
                                 bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
                             except Exception:
@@ -1763,7 +1746,6 @@ def main():
                                 st.rerun()
 
                     st.divider()
-
 
 if __name__ == "__main__":
     main()
