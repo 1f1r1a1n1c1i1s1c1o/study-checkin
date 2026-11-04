@@ -16,11 +16,11 @@ else:
 
 # ================= 兼容性封装 =================
 def _submit(label, **kwargs):
-    """form_submit_button 兼容封装：新版走 width='stretch'，旧版回退 use_container_width。"""
+    """form_submit_button 兼容封装"""
     try:
-        return st.form_submit_button(label, width="stretch", **kwargs)
-    except TypeError:
         return st.form_submit_button(label, use_container_width=True, **kwargs)
+    except TypeError:
+        return st.form_submit_button(label, **kwargs)
 
 # ================= 密码与安全区 =================
 def hash_pwd_sha256(pwd: str) -> str:
@@ -80,7 +80,6 @@ GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
 # ================= 数据库封装 =================
 class SqliteCursor:
-    """sqlite3 结果统一转 dict，与云端 RealDictCursor 行为一致。"""
     def __init__(self, cur):
         self._cur = cur
     @property
@@ -355,7 +354,6 @@ def get_badge_configs():
 @st.cache_data(ttl=10, show_spinner=False)
 def get_balance(oid) -> dict:
     db = get_db()
-    # 优化：使用 UNION ALL 一次性查出所有数据，避免 6 次网络往返
     query = """
         SELECT 'daily' as k, COALESCE(SUM(total_score), 0) as s FROM daily_records WHERE owner_id = ?
         UNION ALL
@@ -389,7 +387,6 @@ def get_balance(oid) -> dict:
     }
 
 def get_makeup_cards_of(username):
-    """读取指定用户的补签卡数量（不存在则 0）。"""
     try:
         db = get_db()
         row = db.execute("SELECT makeup_cards FROM users WHERE username=?", (username,)).fetchone()
@@ -896,7 +893,6 @@ def main():
                                         f'<img src="{b["icon"]}" width="60" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'">'
                                         f'</div>', unsafe_allow_html=True
                                     )
-                                    # 兼容性优化：使用 div 替代 center 标签
                                     st.markdown(f"<div style='text-align: center; font-size: 14px;'>{b['name']}</div>", unsafe_allow_html=True)
                 else:
                     st.caption("暂无徽章。")
@@ -918,7 +914,7 @@ def main():
                 else:
                     final_tz = TIMEZONES[new_tz_name]
 
-                if st.button("保存时区设置"):
+                if st.button("保存时区设置", use_container_width=True):
                     try:
                         db.execute("UPDATE users SET timezone_offset=? WHERE username=?", (final_tz, current_user))
                         db.commit(); st.success("时区已更新！"); st.rerun()
@@ -927,7 +923,7 @@ def main():
 
                 st.divider()
                 new_name = st.text_input("新用户名", placeholder="留空则不修改")
-                if st.button("确认修改用户名"):
+                if st.button("确认修改用户名", use_container_width=True):
                     if new_name and new_name != current_user:
                         if new_name.lower() in ["system", "admin"]:
                             st.error("该用户名为系统保留，请换一个")
@@ -946,7 +942,7 @@ def main():
 
                 st.divider()
                 new_pwd = st.text_input("新密码", type="password", key="new_pwd")
-                if st.button("确认修改密码"):
+                if st.button("确认修改密码", use_container_width=True):
                     if new_pwd:
                         try:
                             db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt(new_pwd), current_user))
@@ -956,7 +952,7 @@ def main():
 
                 st.divider()
                 webhook_input = st.text_input("防遗忘提醒 Webhook", value=user_row.get("webhook_url") or "")
-                if st.button("保存 Webhook"):
+                if st.button("保存 Webhook", use_container_width=True):
                     try:
                         db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user))
                         db.commit(); st.success("保存成功！")
@@ -977,12 +973,12 @@ def main():
                         data=json.dumps(my_data, ensure_ascii=False, indent=2, default=str),
                         file_name=f"backup_{current_user}.json",
                         mime="application/json",
-                        width="stretch"
+                        use_container_width=True
                     )
                 except Exception: pass
 
         st.divider()
-        if st.button("退出登录"):
+        if st.button("退出登录", use_container_width=True):
             del st.session_state.user
             del st.session_state.role
             st.rerun()
@@ -1050,7 +1046,7 @@ def main():
                 c2.metric("Bonus", f"{existing['bonus_score']:.1f}")
                 c3.metric("今日总分", f"{existing['total_score']:.1f}")
                 st.success("今日已完成打卡，记录已锁定。")
-                if st.button("撤销今日打卡（重新填写）", type="secondary", width="stretch"):
+                if st.button("撤销今日打卡（重新填写）", type="secondary", use_container_width=True):
                     try:
                         db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), view_as))
                         db.commit()
@@ -1075,7 +1071,7 @@ def main():
                 c3.metric("预计总分", f"{base_now + bonus:.1f}")
                 if detail.get("tier") in TIER_CN:
                     st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
-                if st.button("保存今日打卡", type="primary", width="stretch"):
+                if st.button("保存今日打卡", type="primary", use_container_width=True):
                     try:
                         save_day(db, get_user_today(user_tz), selected_ids, view_as, now.isoformat())
                         st.success("已保存！"); st.rerun()
@@ -1103,8 +1099,8 @@ def main():
             except Exception:
                 ex_rows = []
             if ex_rows:
-                st.dataframe([{"时间": r["ts"], "事件": html.escape(r["name"]), "积分": r["points"]} for r in ex_rows], width="stretch", hide_index=True)
-                if st.button("清空偶发记录"):
+                st.dataframe([{"时间": r["ts"], "事件": html.escape(r["name"]), "积分": r["points"]} for r in ex_rows], use_container_width=True, hide_index=True)
+                if st.button("清空偶发记录", use_container_width=True):
                     try:
                         db.execute("DELETE FROM extra_points WHERE owner_id=?", (view_as,))
                         db.commit(); st.cache_data.clear(); st.rerun()
@@ -1179,7 +1175,7 @@ def main():
                         y=alt.Y('总分:Q', title='总分', axis=alt.Axis(labelAngle=0)),
                         tooltip=[alt.Tooltip('日期:T', format='%Y-%m-%d'), '总分:Q']
                     ).interactive(),
-                    width="stretch"
+                    use_container_width=True
                 )
                 st.altair_chart(
                     alt.Chart(df_grouped).mark_bar().encode(
@@ -1188,7 +1184,7 @@ def main():
                         color=alt.Color('总分:Q', scale=alt.Scale(scheme='greens'), legend=None),
                         tooltip=[alt.Tooltip('日期:T', format='%Y-%m-%d'), '总分:Q']
                     ),
-                    width="stretch"
+                    use_container_width=True
                 )
             else:
                 st.info("暂无数据。")
@@ -1234,7 +1230,7 @@ def main():
                     confirm_key = f"confirm_buy_{view_as}_{name}"
                     if st.session_state.get(confirm_key):
                         cc1, cc2 = st.columns(2)
-                        if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", type="primary"):
+                        if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", type="primary", use_container_width=True):
                             try:
                                 if name == "补签卡":
                                     db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
@@ -1244,11 +1240,11 @@ def main():
                                 st.cache_data.clear(); st.success("兑换成功！"); st.rerun()
                             except RuntimeError as e:
                                 st.error(str(e))
-                        if cc2.button("取消", key=f"no_{view_as}_{name}"):
+                        if cc2.button("取消", key=f"no_{view_as}_{name}", use_container_width=True):
                             st.session_state[confirm_key] = False
                             st.rerun()
                     else:
-                        if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost)):
+                        if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost), use_container_width=True):
                             st.session_state[confirm_key] = True
                             st.rerun()
 
@@ -1262,7 +1258,7 @@ def main():
                 rows = []
 
             if rows:
-                st.dataframe([{"时间": r["ts"], "奖励": html.escape(r["item"]), "消耗": r["cost"]} for r in rows], width="stretch")
+                st.dataframe([{"时间": r["ts"], "奖励": html.escape(r["item"]), "消耗": r["cost"]} for r in rows], use_container_width=True)
             else:
                 st.info("暂无")
 
@@ -1303,7 +1299,7 @@ def main():
                 st.markdown(f"### 预计获得：**{total_pts:.1f}** 分（达成 {hit_count} 门）")
                 for ln in lines:
                     st.write(ln)
-                if st.button("保存本次成绩", type="primary"):
+                if st.button("保存本次成绩", type="primary", use_container_width=True):
                     try:
                         detail_text = f"达成 {hit_count} 门 | " + "/".join([f"{k}:{v}" for k, v in scores.items()])
                         db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
@@ -1326,7 +1322,7 @@ def main():
                 if st.session_state.get("confirm_roll"):
                     st.warning("🎲 确认消耗今天的机会摇一摇吗？")
                     rc1, rc2 = st.columns(2)
-                    if rc1.button("确认摇一摇", type="primary", width="stretch"):
+                    if rc1.button("确认摇一摇", type="primary", use_container_width=True):
                         try:
                             roll = random.random()
                             pts = random.randint(1, 2) if roll < 0.4 else random.randint(3, 5) if roll < 0.8 else random.randint(6, 8) if roll < 0.95 else random.randint(10, 15)
@@ -1336,15 +1332,15 @@ def main():
                             st.cache_data.clear(); st.balloons(); st.success(f"获得 {pts} 积分！"); st.rerun()
                         except RuntimeError as e:
                             st.error(str(e))
-                    if rc2.button("取消", width="stretch"):
+                    if rc2.button("取消", use_container_width=True):
                         st.session_state["confirm_roll"] = False
                         st.rerun()
                 else:
-                    if st.button("摇一摇", width="stretch"):
+                    if st.button("摇一摇", use_container_width=True):
                         st.session_state["confirm_roll"] = True
                         st.rerun()
 
-    # ============ 系统设置（仅 admin / host 可见） ============
+    # ============ 系统设置 ============
     if "系统设置" in tab_dict:
         with tab_dict["系统设置"]:
             st.subheader("系统设置")
@@ -1355,7 +1351,6 @@ def main():
             else:
                 st.info("当前正在配置你的专属设置。")
 
-            # ---- 1. 修改每日任务 ----
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
             try:
@@ -1372,9 +1367,9 @@ def main():
                     "name": st.column_config.TextColumn("任务名称", required=True),
                     "points": st.column_config.NumberColumn("分数", min_value=0.0, step=0.5)
                 },
-                num_rows="dynamic", width="stretch", key=f"edit_task_{view_as}_{sel_wd}"
+                num_rows="dynamic", use_container_width=True, key=f"edit_task_{view_as}_{sel_wd}"
             )
-            if st.button("保存任务修改"):
+            if st.button("保存任务修改", use_container_width=True):
                 try:
                     db.execute("DELETE FROM config_tasks WHERE weekday=? AND owner_id=?", (sel_wd, view_as))
                     for t in edited_tasks:
@@ -1385,7 +1380,6 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
-            # ---- 2. 修改商城奖励 ----
             st.divider()
             st.markdown("### 2. 修改商城奖励")
             try:
@@ -1400,9 +1394,9 @@ def main():
                     "name": st.column_config.TextColumn("奖励名称", required=True),
                     "cost": st.column_config.NumberColumn("所需积分", min_value=0.0, step=1.0)
                 },
-                num_rows="dynamic", width="stretch", key=f"edit_shop_{view_as}"
+                num_rows="dynamic", use_container_width=True, key=f"edit_shop_{view_as}"
             )
-            if st.button("保存商城修改"):
+            if st.button("保存商城修改", use_container_width=True):
                 try:
                     db.execute("DELETE FROM config_shop WHERE owner_id=?", (view_as,))
                     for s in edited_shop:
@@ -1412,7 +1406,6 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
-            # ---- 3. 修改考试科目 ----
             st.divider()
             st.markdown("### 3. 修改考试科目")
             try:
@@ -1438,10 +1431,10 @@ def main():
                     "目标": st.column_config.TextColumn("目标", required=True),
                     "分差": st.column_config.NumberColumn("分差", min_value=0.0, step=1.0),
                     "单档奖励": st.column_config.NumberColumn("单档奖励", min_value=0.0, step=0.5)
-                }, num_rows="dynamic", width="stretch", key=f"edit_exam_{view_as}"
+                }, num_rows="dynamic", use_container_width=True, key=f"edit_exam_{view_as}"
             )
 
-            if st.button("保存考试科目修改"):
+            if st.button("保存考试科目修改", use_container_width=True):
                 try:
                     db.execute("DELETE FROM config_exam WHERE owner_id=?", (view_as,))
                     has_error = False
@@ -1469,7 +1462,6 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
-            # ---- 4. 修改多科达成奖励 ----
             st.divider()
             st.markdown("### 4. 修改多科达成奖励")
             try:
@@ -1485,9 +1477,9 @@ def main():
                     "hit_count": st.column_config.NumberColumn("达成科目数", min_value=1, step=1),
                     "points": st.column_config.NumberColumn("奖励分数", min_value=0.0, step=0.5)
                 },
-                num_rows="dynamic", width="stretch", key=f"edit_mh_{view_as}"
+                num_rows="dynamic", use_container_width=True, key=f"edit_mh_{view_as}"
             )
-            if st.button("保存多科奖励修改"):
+            if st.button("保存多科奖励修改", use_container_width=True):
                 try:
                     db.execute("DELETE FROM config_exam_multihit WHERE owner_id=?", (view_as,))
                     for _, row in edited_mh.iterrows():
@@ -1498,7 +1490,6 @@ def main():
                 except RuntimeError as e:
                     st.error(str(e))
 
-            # ---- 5. 修改阈值与 Bonus 规则 ----
             st.divider()
             st.markdown("### 5. 修改阈值与 Bonus 规则（阈值与 Bonus 规则下次打卡时生效）")
             try:
@@ -1563,7 +1554,6 @@ def main():
                     except RuntimeError as e:
                         st.error(str(e))
 
-            # ---- 6. 全局徽章配置 ----
             st.divider()
             st.markdown("### 6. 全局徽章配置与 AI 生成")
             if current_role == "admin":
@@ -1600,7 +1590,7 @@ def main():
                         c2.write(f"**{html.escape(b['name'])}**")
                         type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
                         c3.write(f"条件：{type_cn} ≥ {b['cond_val']}")
-                        if c4.button("删除", key=f"del_badge_{b['id']}"):
+                        if c4.button("删除", key=f"del_badge_{b['id']}", use_container_width=True):
                             try:
                                 db.execute("DELETE FROM config_badges WHERE id=?", (b["id"],))
                                 db.commit(); st.cache_data.clear(); st.rerun()
@@ -1609,7 +1599,6 @@ def main():
             else:
                 st.info("全局徽章由管理员配置。")
 
-            # ---- 7. 用户管理与权限控制 ----
             if current_role == "admin":
                 st.divider()
                 st.markdown("### 7. 用户管理与权限控制")
@@ -1638,13 +1627,13 @@ def main():
                     if not is_self:
                         rc1, rc2, rc3, rc4, rc5 = st.columns(5)
 
-                        if rc1.button("→ 管理员", key=f"set_admin_{uname}", disabled=(urole == "admin")):
+                        if rc1.button("→ 管理员", key=f"set_admin_{uname}", disabled=(urole == "admin"), use_container_width=True):
                             try:
                                 db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
                                 db.commit(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
 
-                        if rc2.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host")):
+                        if rc2.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host"), use_container_width=True):
                             try:
                                 blocked = False
                                 if urole == "admin":
@@ -1656,7 +1645,7 @@ def main():
                                     db.commit(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
 
-                        if rc3.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user")):
+                        if rc3.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user"), use_container_width=True):
                             try:
                                 blocked = False
                                 if urole == "admin":
@@ -1668,19 +1657,19 @@ def main():
                                     db.commit(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
 
-                        if rc4.button("重置密码", key=f"reset_{uname}"):
+                        if rc4.button("重置密码", key=f"reset_{uname}", use_container_width=True):
                             try:
                                 db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname))
                                 db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
                             except RuntimeError as e: st.error(str(e))
 
-                        if rc5.button("删除", key=f"del_{uname}"):
+                        if rc5.button("删除", key=f"del_{uname}", use_container_width=True):
                             st.session_state[f"pending_del_{uname}"] = True
                             st.rerun()
 
                         bc1, bc2, bc3 = st.columns([3, 1, 1])
                         bind_val = bc1.text_input("绑定到 host", value=uhost or "", key=f"bind_val_{uname}", label_visibility="collapsed", placeholder="输入 host 用户名")
-                        if bc2.button("保存绑定", key=f"save_bind_{uname}"):
+                        if bc2.button("保存绑定", key=f"save_bind_{uname}", use_container_width=True):
                             target = (bind_val or "").strip()
                             if not target:
                                 st.error("Host 用户名不能为空")
@@ -1707,7 +1696,7 @@ def main():
                                             db.execute("UPDATE users SET host_id=? WHERE username=?", (target, uname))
                                             db.commit(); st.success(f"{uname} 已绑定到 {target}"); st.rerun()
                                 except RuntimeError as e: st.error(str(e))
-                        if bc3.button("解绑", key=f"unbind_{uname}", disabled=(not uhost)):
+                        if bc3.button("解绑", key=f"unbind_{uname}", disabled=(not uhost), use_container_width=True):
                             try:
                                 db.execute("UPDATE users SET host_id=NULL WHERE username=?", (uname,))
                                 db.commit(); st.success(f"{uname} 已解绑"); st.rerun()
@@ -1724,7 +1713,7 @@ def main():
                                 st.warning(f"该用户名下有 {bound_count} 个 user，删除后将解绑（user 数据保留）。")
 
                             cc1, cc2 = st.columns(2)
-                            if cc1.button(f"确认删除 {uname}", key=f"confirm_del_{uname}", type="primary"):
+                            if cc1.button(f"确认删除 {uname}", key=f"confirm_del_{uname}", type="primary", use_container_width=True):
                                 try:
                                     blocked = False
                                     if urole == "admin":
@@ -1741,7 +1730,7 @@ def main():
                                         st.success(f"用户 {uname} 已彻底删除")
                                         st.rerun()
                                 except RuntimeError as e: st.error(str(e))
-                            if cc2.button("取消删除", key=f"cancel_del_{uname}"):
+                            if cc2.button("取消删除", key=f"cancel_del_{uname}", use_container_width=True):
                                 st.session_state.pop(pending_key, None)
                                 st.rerun()
 
