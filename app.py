@@ -77,7 +77,7 @@ DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_po
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
 GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
-# ================= 数据库封装（加入批量执行提速） =================
+# ================= 数据库封装（含批量执行提速） =================
 class SqliteCursor:
     def __init__(self, cur):
         self._cur = cur
@@ -122,12 +122,11 @@ class DBWrapper:
                 raw = self.conn.execute(query, params)
                 return SqliteCursor(raw)
         except (psycopg2.OperationalError, sqlite3.OperationalError) as e:
-            if self.is_cloud and "Connection closed" in str(e):
+            if self.is_cloud:
                 st.cache_resource.clear()
             raise RuntimeError(f"数据库网络波动，请刷新页面重试。({str(e)})")
     
     def executemany(self, query, params_list):
-        """新增：批量执行，极大地提升循环 UPDATE/INSERT 的速度"""
         try:
             if self.is_cloud:
                 if self.conn.closed != 0:
@@ -139,6 +138,8 @@ class DBWrapper:
             else:
                 return self.conn.executemany(query, params_list)
         except (psycopg2.OperationalError, sqlite3.OperationalError) as e:
+            if self.is_cloud:
+                st.cache_resource.clear()
             raise RuntimeError(f"数据库批量操作失败。({str(e)})")
 
     def commit(self):
@@ -185,7 +186,6 @@ def init_db(db):
         try: db.execute(t)
         except: pass
         
-    # 建立数据库索引，极大地加快查询速度
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_daily_records ON daily_records (owner_id, day)",
         "CREATE INDEX IF NOT EXISTS idx_period_bonus ON period_bonus (owner_id)",
@@ -314,12 +314,10 @@ def init_old_admin_data(db, owner_id):
     db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_BONUS_RULES)))
     db.commit()
 
-@st.cache_data(ttl=60, show_spinner=False)
 def get_all_users(db):
     return [{"username": r["username"], "role": r["role"]} for r in db.execute("SELECT username, role FROM users").fetchall()]
 
 # ================= 三级权限 =================
-@st.cache_data(ttl=60, show_spinner=False)
 def get_visible_users(db, current_user, current_role):
     if current_role == "admin":
         return [u["username"] for u in get_all_users(db)]
@@ -495,7 +493,6 @@ def compute_bonus_for_day(day: date, lookup: dict, bonus_rules: dict):
     return float(bonus), {"tier": "weekend_single"}
 
 def recalc_all_bonus(db, oid):
-    """【性能重构】：不再全表重算，只针对最近 30 天批量重算。"""
     try:
         bonus_rules = get_bonus_rules(oid)
         start_d = (get_user_today(8.0) - timedelta(days=30)).isoformat()
@@ -510,47 +507,61 @@ def recalc_all_bonus(db, oid):
             bonus, detail = compute_bonus_for_day(d, lookup, bonus_rules)
             updates.append((bonus, json.dumps(detail), float(lookup[day_str]["base_score"]) + bonus, day_str, oid))
         
-        # 批量提交，速度起飞
         if updates:
             db.executemany("UPDATE daily_records SET bonus_score=?, bonus_detail=?, total_score=? WHERE day=? AND owner_id=?", updates)
             db.commit()
-    except Exception: pass
+    except Exception as e: 
+        print(f"日常连击奖励重算失败: {e}")
 
 def settle_longterm_bonus(db, oid, ts):
-    """【性能重构】：不再全表重算，只针对最近 60 天的周/月批量结算。"""
     try:
         bonus_rules = get_bonus_rules(oid); lt_rules = bonus_rules["longterm"]
-        start_d = (get_user_today(8.0) - timedelta(days=60)).isoformat()
-        rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=? AND day >= ?", (oid, start_d)).fetchall()
-        if not rows: return
-
-        scores = {}
-        for r in rows:
-            try: date.fromisoformat(r["day"])
-            except ValueError: continue
-            scores[r["day"]] = r
-
-        # 清理旧奖励
-        db.execute("DELETE FROM period_bonus WHERE owner_id=?", (oid,))
+        today = get_user_today(8.0)
         
+        min_row = db.execute("SELECT MIN(day) as min_day FROM daily_records WHERE owner_id=?", (oid,)).fetchone()
+        if not min_row or not min_row["min_day"]: 
+            return
+        actual_min = min_row["min_day"]
+        
+        base_start_date = today - timedelta(days=60)
+        base_start_str = max(actual_min, base_start_date.isoformat())
+        
+        d_start = date.fromisoformat(base_start_str)
+        start_monday = (d_start - timedelta(days=d_start.weekday())).isoformat()
+        start_month = date(d_start.year, d_start.month, 1).isoformat()
+        
+        final_start = min(start_monday, start_month)
+        
+        rows = db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=? AND day >= ?", (oid, final_start)).fetchall()
+        scores = {r["day"]: r for r in rows}
+        if not scores:
+            return
+
+        inserts = []
+        keys_to_delete = set()
+
         weeks = {}
         for ds in scores:
             d = date.fromisoformat(ds); y, w, _ = d.isocalendar()
             weeks.setdefault(f"{y}-W{w:02d}", []).append(d)
+            
         week_status = {}
-        inserts = []
-        
         for wk, dlist in weeks.items():
+            keys_to_delete.add(f"W:{wk}")
+            
             monday = min(dlist) - timedelta(days=min(dlist).weekday())
             full_week = [monday + timedelta(days=i) for i in range(7)]
             if not all(x.isoformat() in scores for x in full_week):
                 week_status[wk] = {'is_perfect': False, 'is_basic': False}; continue
+                
             miss_basic = 0; miss_full = 0
             for x in full_week:
                 day_data = scores[x.isoformat()]
                 if float(day_data.get("base_score") or 0) < float(day_data.get("basic_thr") or 999): miss_basic += 1
                 elif float(day_data.get("base_score") or 0) < float(day_data.get("full_thr") or 999): miss_full += 1
-            target_kind, target_pts = None, 0.0; is_perfect = False; is_basic = False
+                
+            target_kind, target_pts = None, 0.0
+            is_perfect = False; is_basic = False
             if miss_basic == 0:
                 is_basic = True
                 if miss_full == 0:
@@ -561,6 +572,7 @@ def settle_longterm_bonus(db, oid, ts):
                     target_kind = "整周达标"; target_pts = lt_rules["week_basic"]
             elif miss_basic == 1:
                 is_basic = True; target_kind = "整周达标(弹性1天)"; target_pts = max(0, lt_rules["week_basic"] - lt_rules.get("week_flex_basic_deduct", 0.5))
+            
             week_status[wk] = {'is_perfect': is_perfect, 'is_basic': is_basic}
             if target_kind:
                 inserts.append((f"W:{wk}", oid, target_kind, target_pts, ts))
@@ -571,13 +583,17 @@ def settle_longterm_bonus(db, oid, ts):
             months.setdefault(f"{y}-{m:02d}", []).append(d)
             
         for mk, dlist in months.items():
+            keys_to_delete.add(f"M:{mk}")
+            
             y, m = int(mk.split("-")[0]), int(mk.split("-")[1])
             first = date(y, m, 1)
             nxt = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
             alldays = []
             cur = first
             while cur < nxt: alldays.append(cur); cur += timedelta(days=1)
+            
             if not all(x.isoformat() in scores for x in alldays): continue
+            
             month_is_perfect = True; month_is_basic = True
             for day_obj in alldays:
                 ds = day_obj.isoformat(); day_data = scores[ds]
@@ -587,16 +603,25 @@ def settle_longterm_bonus(db, oid, ts):
                 day_basic = float(day_data.get("base_score") or 0) >= float(day_data.get("basic_thr") or 999)
                 if not day_full and not w_stat['is_perfect']: month_is_perfect = False
                 if not day_basic and not w_stat['is_basic']: month_is_basic = False
+                
             target_kind, target_pts = None, 0.0
             if month_is_perfect: target_kind = "完美一月"; target_pts = lt_rules["month_full"]
             elif month_is_basic: target_kind = "整月达标"; target_pts = lt_rules["month_basic"]
+            
             if target_kind:
                 inserts.append((f"M:{mk}", oid, target_kind, target_pts, ts))
-                
+
+        if keys_to_delete:
+            keys_list = list(keys_to_delete)
+            placeholders = ",".join(["?"] * len(keys_list))
+            db.execute(f"DELETE FROM period_bonus WHERE owner_id=? AND period_key IN ({placeholders})", (oid, *keys_list))
+            
         if inserts:
             db.executemany("INSERT INTO period_bonus (period_key, owner_id, kind, points, ts) VALUES (?,?,?,?,?)", inserts)
+            
         db.commit()
-    except Exception: pass
+    except Exception as e: 
+        print(f"长期奖励结算失败: {e}")
 
 def save_day(db, day: date, done_ids: list, oid: str, ts: str):
     tasks = get_tasks(day.weekday(), oid)
