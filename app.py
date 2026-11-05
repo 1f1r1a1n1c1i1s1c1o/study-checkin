@@ -8,7 +8,12 @@ import pandas as pd
 import altair as alt
 import bcrypt
 
-IS_CLOUD = "DATABASE_URL" in st.secrets
+# 【修复 1】: 本地无 secrets 时兜底
+try:
+    IS_CLOUD = "DATABASE_URL" in st.secrets
+except Exception:
+    IS_CLOUD = False
+
 if IS_CLOUD:
     import psycopg2, psycopg2.extras
 else:
@@ -372,18 +377,27 @@ def init_db(db):
         except Exception: pass
 
 def init_old_admin_data(db, owner_id):
-    DEFAULT_TASKS = [("hw_sort", 0, "校内", "作业分类", 1.0), ("hw_done", 0, "校内", "作业完成", 2.0)]
+    # 【修复】: 循环把默认任务和阈值插入到周一到周日
+    BASE_TASKS = [
+        ("hw_sort", "校内", "作业分类", 1.0), 
+        ("hw_done", "校内", "作业完成", 2.0)
+    ]
     DEFAULT_SHOP = [("专属夸夸", 6)]
     DEFAULT_EXAM_CONFIG = {"语文": {"type": "score", "max_score": 150, "target": 105.0, "step": 3.0, "step_points": 2.0}}
-    DEFAULT_THRESHOLDS = {0: {"basic": 8.0, "full": 11.0}}
-    for t in DEFAULT_TASKS:
-        db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (t[0], t[1], owner_id, t[2], t[3], t[4]))
+    
+    for i in range(7):
+        for t in BASE_TASKS:
+            db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", 
+                       (t[0], i, owner_id, t[1], t[2], t[3]))
+        
+        db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', 
+                   (i, owner_id, 8.0, 11.0))
+
     for s in DEFAULT_SHOP:
         db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (owner_id, s[0], s[1]))
     for sub, cfg in DEFAULT_EXAM_CONFIG.items():
         db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, owner_id, json.dumps(cfg)))
-    for wd, data in DEFAULT_THRESHOLDS.items():
-        db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', (wd, owner_id, data["basic"], data["full"]))
+    
     db.execute("INSERT INTO config_exam_rules (owner_id, config_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_EXAM_RULES)))
     db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_BONUS_RULES)))
     db.commit()
@@ -1133,6 +1147,22 @@ def main():
                         try:
                             db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt(new_pwd), current_user))
                             db.commit(); st.success("密码已修改！")
+                        except RuntimeError as e:
+                            st.error(str(e))
+
+                st.divider()
+                st.markdown("**修改密保**")
+                new_sq = st.text_input("新密保问题", max_chars=50, key="new_sq")
+                new_sa = st.text_input("新密保答案", max_chars=50, key="new_sa")
+                if st.button("保存密保", **_stretch({})):
+                    if not new_sq or not new_sa:
+                        st.error("密保问题和答案不能为空")
+                    else:
+                        try:
+                            hashed_sa = hash_pwd_sha256(new_sa.strip().lower())
+                            db.execute("UPDATE users SET security_question=?, security_answer=? WHERE username=?", (new_sq, hashed_sa, current_user))
+                            db.commit()
+                            st.success("密保已修改！")
                         except RuntimeError as e:
                             st.error(str(e))
 
