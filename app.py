@@ -18,7 +18,6 @@ if IS_CLOUD:
     import psycopg2, psycopg2.extras
 else:
     import sqlite3
-    # 【修复 2】: 防止本地未安装 psycopg2 时，except 分支触发 NameError
     class DummyPsycopg2:
         class OperationalError(Exception): pass
     psycopg2 = DummyPsycopg2()
@@ -123,7 +122,7 @@ DEFAULT_EXAM_RULES = {"hit_points": 1.0, "rank_top_percent": 75.0, "rank_base_po
 TIER_CN = {"single": "单日达标", "streak2": "连续2日达标", "streak4": "连续4日达标", "weekend_single": "周末单日达标"}
 GRADES = ["A+", "A", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "E"]
 
-# ================= 数据库封装（含日志与备份） =================
+# ================= 数据库封装 =================
 class SqliteCursor:
     def __init__(self, cur):
         self._cur = cur
@@ -381,7 +380,18 @@ def init_db(db):
         except Exception: pass
 
 def init_old_admin_data(db, owner_id):
-    # 【修复 3】: 给任务的 id 加上星期后缀，彻底避开主键冲突问题
+    # 【修复】：先清理旧配置，防止主键冲突
+    try:
+        db.execute("DELETE FROM config_tasks WHERE owner_id=?", (owner_id,))
+        db.execute("DELETE FROM config_thresholds WHERE owner_id=?", (owner_id,))
+        db.execute("DELETE FROM config_shop WHERE owner_id=?", (owner_id,))
+        db.execute("DELETE FROM config_exam WHERE owner_id=?", (owner_id,))
+        db.execute("DELETE FROM config_exam_rules WHERE owner_id=?", (owner_id,))
+        db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (owner_id,))
+        db.commit()
+    except Exception as e:
+        print(f"清理旧配置失败: {e}")
+
     BASE_TASKS = [
         ("hw_sort", "校内", "作业分类", 1.0), 
         ("hw_done", "校内", "作业完成", 2.0)
@@ -391,7 +401,8 @@ def init_old_admin_data(db, owner_id):
     
     for i in range(7):
         for t in BASE_TASKS:
-            task_id = f"{t[0]}_d{i}"
+            # 【修复】：把 owner_id 加入 task_id，确保跨用户绝对唯一
+            task_id = f"{owner_id}_{t[0]}_d{i}"
             db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", 
                        (task_id, i, owner_id, t[1], t[2], t[3]))
         
@@ -905,7 +916,11 @@ def login_page(db):
                                 (u, hash_pwd_bcrypt(p), sq, hash_pwd_sha256(sa.strip().lower()))
                             )
                             db.commit()
-                            init_old_admin_data(db, u)
+                            try:
+                                init_old_admin_data(db, u)
+                            except Exception as e:
+                                print(f"初始化新用户默认配置失败: {e}")
+                                st.warning("注册成功，但默认任务配置初始化失败，请联系管理员。")
                             st.cache_data.clear()
                             st.success("注册成功！请去登录。")
                     except RuntimeError as e:
@@ -1028,6 +1043,9 @@ def main():
         st.title("学习打卡")
         is_mobile_mode = st.checkbox("📱 手机精简模式", value=False)
 
+        # 默认值兜底
+        bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
+
         try:
             visible_users = get_visible_users(current_user, current_role)
         except Exception:
@@ -1069,16 +1087,17 @@ def main():
             role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
             st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
             
+            # 尝试获取余额
+            try:
+                bal = get_balance(view_as)
+            except Exception:
+                pass
+                
             if current_role != "host":
-                try:
-                    bal = get_balance(view_as)
-                except Exception:
-                    bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
                 st.metric("当前可用积分", f"{bal['balance']:.1f}")
         else:
             role_display = "Host"
             st.info(f"当前身份：{html.escape(current_user)} (Host)\n\n暂无绑定的孩子。")
-            bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
 
         if not is_mobile_mode and (current_role == "admin" or (current_role == "host" and view_as)):
             with st.expander("专注计时器 (番茄钟)", expanded=False):
