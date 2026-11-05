@@ -18,6 +18,10 @@ if IS_CLOUD:
     import psycopg2, psycopg2.extras
 else:
     import sqlite3
+    # 【修复 2】: 防止本地未安装 psycopg2 时，except 分支触发 NameError
+    class DummyPsycopg2:
+        class OperationalError(Exception): pass
+    psycopg2 = DummyPsycopg2()
 
 # ================= 兼容性封装与运维工具 =================
 def _stretch(kwargs):
@@ -163,11 +167,11 @@ class DBWrapper:
             else:
                 raw = self.conn.execute(query, params)
                 return SqliteCursor(raw)
-        except (psycopg2.OperationalError, sqlite3.OperationalError) as e:
+        except Exception as e:
             if self.is_cloud:
                 st.cache_resource.clear()
             _log_db_error("execute", str(e))
-            raise RuntimeError(f"数据库网络波动，请刷新页面重试。({str(e)})")
+            raise RuntimeError(f"数据库操作失败，请刷新重试。({str(e)})")
     
     def executemany(self, query, params_list):
         try:
@@ -180,7 +184,7 @@ class DBWrapper:
                 return cur
             else:
                 return self.conn.executemany(query, params_list)
-        except (psycopg2.OperationalError, sqlite3.OperationalError) as e:
+        except Exception as e:
             if self.is_cloud:
                 st.cache_resource.clear()
             _log_db_error("executemany", str(e))
@@ -377,7 +381,7 @@ def init_db(db):
         except Exception: pass
 
 def init_old_admin_data(db, owner_id):
-    # 【修复】: 循环把默认任务和阈值插入到周一到周日
+    # 【修复 3】: 给任务的 id 加上星期后缀，彻底避开主键冲突问题
     BASE_TASKS = [
         ("hw_sort", "校内", "作业分类", 1.0), 
         ("hw_done", "校内", "作业完成", 2.0)
@@ -387,8 +391,9 @@ def init_old_admin_data(db, owner_id):
     
     for i in range(7):
         for t in BASE_TASKS:
+            task_id = f"{t[0]}_d{i}"
             db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", 
-                       (t[0], i, owner_id, t[1], t[2], t[3]))
+                       (task_id, i, owner_id, t[1], t[2], t[3]))
         
         db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', 
                    (i, owner_id, 8.0, 11.0))
@@ -905,6 +910,8 @@ def login_page(db):
                             st.success("注册成功！请去登录。")
                     except RuntimeError as e:
                         st.error(str(e))
+                    except Exception as e:
+                        st.error(f"注册失败：{str(e)}")
 
     with tab3:
         st.write("输入用户名，验证密保问题后重设密码。")
