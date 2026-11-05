@@ -50,7 +50,6 @@ def _backup_sqlite():
         try:
             import shutil
             shutil.copy2(DB_PATH, backup_file)
-            # 只保留最近 7 天
             files = sorted(backup_dir.glob("study_points_*.db"))
             if len(files) > 7:
                 for f in files[:-7]:
@@ -402,8 +401,8 @@ def get_visible_users(current_user, current_role):
     if current_role == "host":
         db = get_db()
         rows = db.execute(
-            "SELECT username FROM users WHERE username=? OR host_id=?",
-            (current_user, current_user)
+            "SELECT username FROM users WHERE host_id=?",
+            (current_user,)
         ).fetchall()
         return [r["username"] for r in rows]
     return [current_user]
@@ -1011,41 +1010,56 @@ def main():
         try:
             visible_users = get_visible_users(current_user, current_role)
         except Exception:
-            visible_users = [current_user]
-        if current_user not in visible_users:
-            visible_users = [current_user] + visible_users
+            visible_users = [current_user] if current_role == "user" else []
 
         if current_role == "user":
             view_as = current_user
-        elif current_role in ("admin", "host"):
+        elif current_role == "admin":
+            if current_user not in visible_users:
+                visible_users = [current_user] + visible_users
             idx = visible_users.index(current_user) if current_user in visible_users else 0
-            label = "管理员特权：切换账号" if current_role == "admin" else "切换配置对象"
-            view_as = st.selectbox(label, visible_users, index=idx)
+            view_as = st.selectbox("管理员特权：切换账号", visible_users, index=idx)
+        elif current_role == "host":
+            if visible_users:
+                view_as = st.selectbox("选择孩子", visible_users, index=0)
+            else:
+                view_as = None
         else:
             view_as = current_user
 
-        if view_as not in visible_users:
-            view_as = current_user
+        if current_role == "host":
+            if view_as not in visible_users and visible_users:
+                view_as = visible_users[0]
+            elif not visible_users:
+                view_as = None
+        else:
+            if view_as not in visible_users:
+                view_as = current_user
 
-        try:
-            target_urow = db.execute("SELECT timezone_offset FROM users WHERE username=?", (view_as,)).fetchone()
-            target_tz = target_urow.get("timezone_offset") if target_urow else 8.0
-            if target_tz is None: target_tz = 8.0
-        except Exception:
-            target_tz = 8.0
-        view_today = get_user_today(target_tz)
-
-        view_makeup_sidebar = get_makeup_cards_of(view_as)
-
-        role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
-        st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
-        try:
-            bal = get_balance(view_as)
-        except Exception:
+        if view_as:
+            try:
+                target_urow = db.execute("SELECT timezone_offset FROM users WHERE username=?", (view_as,)).fetchone()
+                target_tz = target_urow.get("timezone_offset") if target_urow else 8.0
+                if target_tz is None: target_tz = 8.0
+            except Exception:
+                target_tz = 8.0
+            view_today = get_user_today(target_tz)
+            view_makeup_sidebar = get_makeup_cards_of(view_as)
+            role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
+            st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
+            
+            if current_role != "host":
+                try:
+                    bal = get_balance(view_as)
+                except Exception:
+                    bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
+                st.metric("当前可用积分", f"{bal['balance']:.1f}")
+        else:
+            role_display = "Host"
+            st.info(f"当前身份：{html.escape(current_user)} (Host)\n\n暂无绑定的孩子。")
             bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
-        st.metric("当前可用积分", f"{bal['balance']:.1f}")
 
-        if not is_mobile_mode:
+        if not is_mobile_mode and (current_role == "admin" or (current_role == "host" and view_as)):
             with st.expander("专注计时器 (番茄钟)", expanded=False):
                 render_timer()
             with st.expander("我的成就徽章"):
@@ -1155,100 +1169,106 @@ def main():
             del st.session_state.role
             st.rerun()
 
+    if current_role == "host" and view_as is None:
+        st.info("暂无绑定的孩子，请联系管理员绑定后再使用。")
+        st.stop()
+
     base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
     base_mobile = ["打卡", "商城", "兑换"]
-    can_config = current_role in ("admin", "host")
 
-    if is_mobile_mode:
-        tabs = base_mobile + (["系统设置"] if can_config else [])
+    if current_role == "admin":
+        tabs = base_desktop + ["系统设置"]
+    elif current_role == "host":
+        tabs = ["历史与图表", "系统设置"]
     else:
-        tabs = base_desktop + (["系统设置"] if can_config else [])
+        tabs = base_desktop
 
     tab_objs = st.tabs(tabs)
     tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
 
     # ============ 打卡 ============
-    with tab_dict.get("打卡"):
-        try:
-            tasks = get_tasks(view_today.weekday(), view_as)
-        except Exception:
-            tasks = []
-
-        if not tasks:
-            st.warning("今日还没有配置任务哦，请去【系统设置】里添加！")
-        else:
+    if "打卡" in tab_dict:
+        with tab_dict["打卡"]:
             try:
-                thresholds = get_thresholds(view_as); thr = thresholds.get(view_today.weekday(), {"basic": 0, "full": 0})
+                tasks = get_tasks(view_today.weekday(), view_as)
             except Exception:
-                thr = {"basic": 0, "full": 0}
+                tasks = []
 
-            st.subheader(f"{view_today.strftime('%m月%d日')} - {WEEKDAY_CN[view_today.weekday()]}")
-            st.caption(f"基本要求：{thr['basic']} 分 | 满分：{thr['full']} 分")
+            if not tasks:
+                st.warning("今日还没有配置任务哦，请去【系统设置】里添加！")
+            else:
+                try:
+                    thresholds = get_thresholds(view_as); thr = thresholds.get(view_today.weekday(), {"basic": 0, "full": 0})
+                except Exception:
+                    thr = {"basic": 0, "full": 0}
 
-            try:
-                existing = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
-            except Exception:
-                existing = None
+                st.subheader(f"{view_today.strftime('%m月%d日')} - {WEEKDAY_CN[view_today.weekday()]}")
+                st.caption(f"基本要求：{thr['basic']} 分 | 满分：{thr['full']} 分")
 
-            already_done = existing is not None
-            done_ids = set(json.loads(existing["done_tasks"])) if (existing and existing["done_tasks"]) else set()
+                try:
+                    existing = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
+                except Exception:
+                    existing = None
 
-            cats = {}
-            for t in tasks:
-                cats.setdefault(t["category"], []).append(t)
+                already_done = existing is not None
+                done_ids = set(json.loads(existing["done_tasks"])) if (existing and existing["done_tasks"]) else set()
 
-            selected_ids = []
-            for cat, items in cats.items():
-                st.markdown(f"**{html.escape(cat)}**")
-                if is_mobile_mode:
-                    for t in items:
-                        if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{t['id']}", disabled=already_done):
-                            if not already_done: selected_ids.append(t["id"])
-                else:
-                    cols = st.columns(2)
-                    for i, t in enumerate(items):
-                        with cols[i % 2]:
+                cats = {}
+                for t in tasks:
+                    cats.setdefault(t["category"], []).append(t)
+
+                selected_ids = []
+                for cat, items in cats.items():
+                    st.markdown(f"**{html.escape(cat)}**")
+                    if is_mobile_mode:
+                        for t in items:
                             if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{t['id']}", disabled=already_done):
                                 if not already_done: selected_ids.append(t["id"])
+                    else:
+                        cols = st.columns(2)
+                        for i, t in enumerate(items):
+                            with cols[i % 2]:
+                                if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{t['id']}", disabled=already_done):
+                                    if not already_done: selected_ids.append(t["id"])
 
-            st.divider()
-            c1, c2, c3 = st.columns(3)
-            if already_done:
-                c1.metric("基础分", f"{float(existing['base_score'] or 0):.1f}")
-                c2.metric("Bonus", f"{float(existing['bonus_score'] or 0):.1f}")
-                c3.metric("今日总分", f"{float(existing['total_score'] or 0):.1f}")
-                st.success("今日已完成打卡，记录已锁定。")
-                if st.button("撤销今日打卡（重新填写）", **_stretch({"type": "secondary"})):
+                st.divider()
+                c1, c2, c3 = st.columns(3)
+                if already_done:
+                    c1.metric("基础分", f"{float(existing['base_score'] or 0):.1f}")
+                    c2.metric("Bonus", f"{float(existing['bonus_score'] or 0):.1f}")
+                    c3.metric("今日总分", f"{float(existing['total_score'] or 0):.1f}")
+                    st.success("今日已完成打卡，记录已锁定。")
+                    if st.button("撤销今日打卡（重新填写）", **_stretch({"type": "secondary"})):
+                        try:
+                            db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as))
+                            db.commit()
+                            recalc_all_bonus(db, view_as)
+                            settle_longterm_bonus(db, view_as, now.isoformat())
+                            st.cache_data.clear()
+                            st.rerun()
+                        except RuntimeError as e:
+                            st.error(str(e))
+                else:
+                    base_now = sum(t["points"] for t in tasks if t["id"] in set(selected_ids))
                     try:
-                        db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as))
-                        db.commit()
-                        recalc_all_bonus(db, view_as)
-                        settle_longterm_bonus(db, view_as, now.isoformat())
-                        st.cache_data.clear()
-                        st.rerun()
-                    except RuntimeError as e:
-                        st.error(str(e))
-            else:
-                base_now = sum(t["points"] for t in tasks if t["id"] in set(selected_ids))
-                try:
-                    lookup = {r["day"]: {"base_score": float(r["base_score"] or 0), "basic_thr": float(r.get("basic_thr") or 0), "full_thr": float(r.get("full_thr") or 0)}
-                              for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
-                    lookup[view_today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
-                    bonus, detail = compute_bonus_for_day(view_today, lookup, get_bonus_rules(view_as))
-                except Exception:
-                    bonus, detail = 0.0, {}
+                        lookup = {r["day"]: {"base_score": float(r["base_score"] or 0), "basic_thr": float(r.get("basic_thr") or 0), "full_thr": float(r.get("full_thr") or 0)}
+                                  for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
+                        lookup[view_today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
+                        bonus, detail = compute_bonus_for_day(view_today, lookup, get_bonus_rules(view_as))
+                    except Exception:
+                        bonus, detail = 0.0, {}
 
-                c1.metric("基础分", f"{base_now:.1f}")
-                c2.metric("Bonus", f"{bonus:.1f}")
-                c3.metric("预计总分", f"{base_now + bonus:.1f}")
-                if detail.get("tier") in TIER_CN:
-                    st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
-                if st.button("保存今日打卡", **_stretch({"type": "primary"})):
-                    try:
-                        save_day(db, view_today, selected_ids, view_as, now.isoformat())
-                        st.success("已保存！"); st.rerun()
-                    except RuntimeError as e:
-                        st.error(str(e))
+                    c1.metric("基础分", f"{base_now:.1f}")
+                    c2.metric("Bonus", f"{bonus:.1f}")
+                    c3.metric("预计总分", f"{base_now + bonus:.1f}")
+                    if detail.get("tier") in TIER_CN:
+                        st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
+                    if st.button("保存今日打卡", **_stretch({"type": "primary"})):
+                        try:
+                            save_day(db, view_today, selected_ids, view_as, now.isoformat())
+                            st.success("已保存！"); st.rerun()
+                        except RuntimeError as e:
+                            st.error(str(e))
 
     # ============ 偶发 ============
     if "偶发" in tab_dict:
@@ -1286,43 +1306,47 @@ def main():
         with tab_dict["历史与图表"]:
             st.subheader("历史与图表分析")
             view_makeup_hist = get_makeup_cards_of(view_as)
-            if view_makeup_hist > 0:
-                st.markdown(f"🎫 **当前配置对象有 {view_makeup_hist} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
-                try:
-                    missing_dates = [view_today - timedelta(days=i) for i in range(1, 8)
-                                     if not db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", ((view_today - timedelta(days=i)).isoformat(), view_as)).fetchone()]
-                except Exception:
-                    missing_dates = []
-
-                if missing_dates:
-                    sel_date = st.selectbox("选择要补签的日期", missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({WEEKDAY_CN[x.weekday()]})")
-                    past_tasks = get_tasks(sel_date.weekday(), view_as)
-                    st.write(f"**请勾选你在 {sel_date.strftime('%m月%d日')} 实际完成的任务（提交后将强制算作满分）：**")
-                    with st.form("makeup_form"):
-                        selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
-                        if _submit("使用 1 张补签卡并提交", **_stretch({"type": "primary"})):
-                            try:
-                                cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (view_as,))
-                                db.commit()
-                                if cur.rowcount > 0:
-                                    t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
-                                    db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
-                                    db.execute(
-                                        "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
-                                        (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
-                                    )
-                                    db.commit()
-                                    recalc_all_bonus(db, view_as)
-                                    settle_longterm_bonus(db, view_as, now.isoformat())
-                                    st.cache_data.clear(); st.success("补签成功！"); st.rerun()
-                                else:
-                                    st.error("补签失败，当前配置对象余额不足。")
-                            except RuntimeError as e:
-                                st.error(str(e))
-                else:
-                    st.info("最近 7 天全勤！")
+            
+            if current_role == "host":
+                st.info("💡 补签请让孩子在自己的账号里操作。")
             else:
-                st.info('💡 提示：商城有售「补签卡」。')
+                if view_makeup_hist > 0:
+                    st.markdown(f"🎫 **当前配置对象有 {view_makeup_hist} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
+                    try:
+                        missing_dates = [view_today - timedelta(days=i) for i in range(1, 8)
+                                         if not db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", ((view_today - timedelta(days=i)).isoformat(), view_as)).fetchone()]
+                    except Exception:
+                        missing_dates = []
+
+                    if missing_dates:
+                        sel_date = st.selectbox("选择要补签的日期", missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({WEEKDAY_CN[x.weekday()]})")
+                        past_tasks = get_tasks(sel_date.weekday(), view_as)
+                        st.write(f"**请勾选你在 {sel_date.strftime('%m月%d日')} 实际完成的任务（提交后将强制算作满分）：**")
+                        with st.form("makeup_form"):
+                            selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
+                            if _submit("使用 1 张补签卡并提交", **_stretch({"type": "primary"})):
+                                try:
+                                    cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (view_as,))
+                                    db.commit()
+                                    if cur.rowcount > 0:
+                                        t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
+                                        db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
+                                        db.execute(
+                                            "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
+                                            (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
+                                        )
+                                        db.commit()
+                                        recalc_all_bonus(db, view_as)
+                                        settle_longterm_bonus(db, view_as, now.isoformat())
+                                        st.cache_data.clear(); st.success("补签成功！"); st.rerun()
+                                    else:
+                                        st.error("补签失败，当前配置对象余额不足。")
+                                except RuntimeError as e:
+                                    st.error(str(e))
+                    else:
+                        st.info("最近 7 天全勤！")
+                else:
+                    st.info('💡 提示：商城有售「补签卡」。')
 
             st.divider()
             time_view = st.radio("时间维度", ["按日查看", "按周查看", "按月查看"], horizontal=True)
@@ -1520,12 +1544,11 @@ def main():
     if "系统设置" in tab_dict:
         with tab_dict["系统设置"]:
             st.subheader("系统设置")
+
             if current_role == "admin":
                 st.info(f"当前正在配置：**{html.escape(view_as)}**")
             elif current_role == "host":
-                st.info(f"当前正在配置：**{html.escape(view_as)}**")
-            else:
-                st.info("当前正在配置你的专属设置。")
+                st.info(f"当前正在配置：**{html.escape(view_as)}**（你绑定的孩子）")
 
             # ---- 1. 修改每日任务 ----
             st.markdown("### 1. 修改每日任务")
