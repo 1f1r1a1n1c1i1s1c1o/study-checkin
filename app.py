@@ -165,7 +165,6 @@ def get_db():
         return db
 
 def init_db(db):
-    # 1) 无 SERIAL 主键的通用表（两端同 SQL）
     tables_common = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
@@ -181,7 +180,6 @@ def init_db(db):
         try: db.execute(t)
         except: pass
 
-    # 2) 有自增主键的 6 张表，按 db.is_cloud 分支拼接
     pk_expr = "SERIAL PRIMARY KEY" if db.is_cloud else "INTEGER PRIMARY KEY AUTOINCREMENT"
     tables_pk_cols = [
         ("redemptions",     "id {pk}, owner_id TEXT, item TEXT, cost REAL, ts TEXT"),
@@ -196,7 +194,6 @@ def init_db(db):
             db.execute(f"CREATE TABLE IF NOT EXISTS {tname} ({cols.format(pk=pk_expr)})")
         except: pass
 
-    # 3) 建索引
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_daily_records ON daily_records (owner_id, day)",
         "CREATE INDEX IF NOT EXISTS idx_period_bonus ON period_bonus (owner_id)",
@@ -209,7 +206,6 @@ def init_db(db):
         except: pass
     db.commit()
 
-    # 4) 老表字段迁移
     if db.is_cloud:
         for q in [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT",
@@ -267,7 +263,6 @@ def init_db(db):
             except: pass
         db.commit()
 
-    # 5) 初始化管理员（首次建库时）
     try:
         user_count = db.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
         if user_count == 0:
@@ -302,7 +297,6 @@ def init_db(db):
     except Exception as e:
         print(f"初始化管理员失败: {e}")
 
-    # 6) 初始化徽章（首次建库时）
     try:
         global_badge_count = db.execute("SELECT COUNT(*) as c FROM config_badges WHERE owner_id='system'").fetchone()["c"]
         if global_badge_count == 0:
@@ -321,7 +315,6 @@ def init_db(db):
         db.commit()
     except Exception: pass
 
-    # 7) 【新增】本地模式检测旧结构：id 全为 NULL 的表提示
     if not db.is_cloud:
         try:
             bad_tables = []
@@ -332,7 +325,6 @@ def init_db(db):
             if bad_tables:
                 msg = f"⚠️ 本地库检测到旧结构（id 为 NULL）：{', '.join(bad_tables)}。建议删库重建或手动迁移。"
                 print(msg)
-                # 非阻塞提示（只在 sidebar 之外的顶部轻提示）
                 try:
                     st.session_state["_old_sqlite_warning"] = msg
                 except Exception:
@@ -356,7 +348,7 @@ def init_old_admin_data(db, owner_id):
     db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_BONUS_RULES)))
     db.commit()
 
-# ================= 用户列表相关（去掉 db 参数，避免 cache 不稳定） =================
+# ================= 用户列表相关 =================
 @st.cache_data(ttl=60, show_spinner=False)
 def get_all_users():
     db = get_db()
@@ -853,7 +845,10 @@ def login_page(db):
                                 "INSERT INTO users (username, password_hash, role, security_question, security_answer) VALUES (?, ?, 'user', ?, ?)",
                                 (u, hash_pwd_bcrypt(p), sq, hash_pwd_sha256(sa.strip().lower()))
                             )
-                            db.commit(); st.cache_data.clear(); st.success("注册成功！请去登录。")
+                            db.commit()
+                            init_old_admin_data(db, u)
+                            st.cache_data.clear()
+                            st.success("注册成功！请去登录。")
                     except RuntimeError as e:
                         st.error(str(e))
 
@@ -893,7 +888,6 @@ def main():
     except RuntimeError as e:
         st.error(str(e)); st.stop()
 
-    # 旧结构提示（本地 SQLite 首次发现 id 全为 NULL 时）
     old_warn = st.session_state.get("_old_sqlite_warning")
     if old_warn:
         st.warning(old_warn)
@@ -1789,8 +1783,14 @@ def main():
                                         st.error("这是系统里最后一个管理员，不能降级为 Host。请先提升另一个用户为管理员。")
                                         blocked = True
                                 if not blocked:
-                                    db.execute("UPDATE users SET role='host' WHERE username=?", (uname,))
-                                    db.commit(); st.cache_data.clear(); st.rerun()
+                                    if urole == "host":
+                                        bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                                        if bound_count > 0:
+                                            st.session_state[f"confirm_demote_{uname}"] = 'host'
+                                            st.rerun()
+                                    if urole != "host":
+                                        db.execute("UPDATE users SET role='host' WHERE username=?", (uname,))
+                                        db.commit(); st.cache_data.clear(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
 
                         if rc3.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user"), use_container_width=True):
@@ -1801,8 +1801,14 @@ def main():
                                         st.error("这是系统里最后一个管理员，不能降级为普通用户。请先提升另一个用户为管理员。")
                                         blocked = True
                                 if not blocked:
-                                    db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
-                                    db.commit(); st.cache_data.clear(); st.rerun()
+                                    if urole == "host":
+                                        bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                                        if bound_count > 0:
+                                            st.session_state[f"confirm_demote_{uname}"] = 'user'
+                                            st.rerun()
+                                    if urole != "host":
+                                        db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
+                                        db.commit(); st.cache_data.clear(); st.rerun()
                             except RuntimeError as e: st.error(str(e))
 
                         if rc4.button("重置密码", key=f"reset_{uname}", use_container_width=True):
@@ -1881,6 +1887,28 @@ def main():
                                 except RuntimeError as e: st.error(str(e))
                             if cc2.button("取消删除", key=f"cancel_del_{uname}", use_container_width=True):
                                 st.session_state.pop(pending_key, None)
+                                st.rerun()
+
+                        # Host 降级确认弹窗
+                        if st.session_state.get(f"confirm_demote_{uname}"):
+                            target_role = st.session_state[f"confirm_demote_{uname}"]
+                            try:
+                                bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                            except Exception:
+                                bound_count = 0
+                            st.warning(f"该 host 下有 {bound_count} 个 user，降级/变更后将解绑。是否确认将 {uname} 变更为 {target_role}？")
+                            cc1, cc2 = st.columns(2)
+                            if cc1.button("确认降级", key=f"confirm_demote_btn_{uname}", type="primary", use_container_width=True):
+                                try:
+                                    db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
+                                    db.execute("UPDATE users SET role=? WHERE username=?", (target_role, uname))
+                                    db.commit()
+                                    del st.session_state[f"confirm_demote_{uname}"]
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                except RuntimeError as e: st.error(str(e))
+                            if cc2.button("取消", key=f"cancel_demote_{uname}", use_container_width=True):
+                                del st.session_state[f"confirm_demote_{uname}"]
                                 st.rerun()
 
                     st.divider()
