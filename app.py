@@ -150,10 +150,10 @@ class DBWrapper:
             self.conn.autocommit = False
 
     def rollback(self):
-        if self.is_cloud:
+        try:
             self.conn.rollback()
-        else:
-            self.conn.rollback()
+        except Exception:
+            pass
 
     def end(self):
         if self.is_cloud:
@@ -467,20 +467,44 @@ def init_old_admin_data(db, owner_id):
     for i in range(7):
         for t in BASE_TASKS:
             task_id = f"{owner_id}_{t[0]}_d{i}"
-            db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", 
-                       (task_id, i, owner_id, t[1], t[2], t[3]))
+            try:
+                db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", 
+                           (task_id, i, owner_id, t[1], t[2], t[3]))
+            except Exception as e:
+                print(f"插入任务失败 (weekday={i}, name={t[2]}): {e}")
         
-        db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', 
-                   (i, owner_id, 8.0, 11.0))
+        try:
+            db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', 
+                       (i, owner_id, 8.0, 11.0))
+        except Exception as e:
+            print(f"插入阈值失败 (weekday={i}): {e}")
 
     for s in DEFAULT_SHOP:
-        db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (owner_id, s[0], s[1]))
+        try:
+            db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (owner_id, s[0], s[1]))
+        except Exception as e:
+            print(f"插入商城失败: {e}")
+            
     for sub, cfg in DEFAULT_EXAM_CONFIG.items():
-        db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, owner_id, json.dumps(cfg)))
+        try:
+            db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, owner_id, json.dumps(cfg)))
+        except Exception as e:
+            print(f"插入考试科目失败: {e}")
     
-    db.execute("INSERT INTO config_exam_rules (owner_id, config_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_EXAM_RULES)))
-    db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_BONUS_RULES)))
-    db.commit()
+    try:
+        db.execute("INSERT INTO config_exam_rules (owner_id, config_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_EXAM_RULES)))
+    except Exception as e:
+        print(f"插入考试规则失败: {e}")
+
+    try:
+        db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (owner_id, json.dumps(DEFAULT_BONUS_RULES)))
+    except Exception as e:
+        print(f"插入加分规则失败: {e}")
+
+    try:
+        db.commit()
+    except Exception as e:
+        print(f"提交默认配置失败: {e}")
 
 # ================= 用户列表相关 =================
 @st.cache_data(ttl=60, show_spinner=False)
@@ -990,8 +1014,7 @@ def login_page(db):
                             try:
                                 init_old_admin_data(db, u)
                             except Exception as e:
-                                print(f"初始化新用户默认配置失败: {e}")
-                                st.warning("注册成功，但默认任务配置初始化失败，请联系管理员。")
+                                print(f"初始化新用户默认配置失败（静默处理，不影响注册）: {e}")
                             st.cache_data.clear()
                             st.success("注册成功！请去登录。")
                     except RuntimeError as e:
