@@ -225,7 +225,11 @@ def init_db(db):
                 "config_tasks_pkey",
                 "config_shop_pkey",
                 "config_exam_rules_pkey",
-                "config_badges_pkey"
+                "config_badges_pkey",
+                "daily_records_pkey",
+                "extra_points_pkey",
+                "special_events_pkey",
+                "redemptions_pkey",
             ]
             for c in drop_constraints:
                 tbl = c.replace("_pkey", "")
@@ -1415,10 +1419,11 @@ def main():
                         with st.form("makeup_form"):
                             selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
                             if _submit("使用 1 张补签卡并提交", **_stretch({"type": "primary"})):
-                                try:
-                                    cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (view_as,))
-                                    db.commit()
-                                    if cur.rowcount > 0:
+                                user_cards = get_makeup_cards_of(view_as)
+                                if user_cards <= 0:
+                                    st.error("余额不足，无法补签。")
+                                else:
+                                    try:
                                         t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
                                         db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
                                         db.execute(
@@ -1426,13 +1431,18 @@ def main():
                                             (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
                                         )
                                         db.commit()
+                                        
+                                        # 记录写入成功后，再扣除补签卡
+                                        db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (view_as,))
+                                        db.commit()
+                                        
                                         recalc_all_bonus(db, view_as)
                                         settle_longterm_bonus(db, view_as, now.isoformat())
-                                        st.cache_data.clear(); st.success("补签成功！"); st.rerun()
-                                    else:
-                                        st.error("补签失败，当前配置对象余额不足。")
-                                except RuntimeError as e:
-                                    st.error(str(e))
+                                        st.cache_data.clear()
+                                        st.success("补签成功！")
+                                        st.rerun()
+                                    except RuntimeError as e:
+                                        st.error(f"补签失败：{str(e)}")
                     else:
                         st.info("最近 7 天全勤！")
                 else:
@@ -1522,10 +1532,12 @@ def main():
                                 if curr_bal["balance"] < cost:
                                     st.error("积分不足，兑换失败。")
                                 else:
-                                    if name == "补签卡":
-                                        db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
+                                    # 先写兑换记录，成功后再发卡/改属性
                                     db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
                                     db.commit()
+                                    if name == "补签卡":
+                                        db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
+                                        db.commit()
                                     st.session_state[confirm_key] = False
                                     st.cache_data.clear(); st.success("兑换成功！"); st.rerun()
                             except RuntimeError as e:
