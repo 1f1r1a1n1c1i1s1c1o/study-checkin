@@ -144,6 +144,21 @@ class DBWrapper:
     def __init__(self, conn, is_cloud):
         self.conn = conn
         self.is_cloud = is_cloud
+
+    def begin(self):
+        if self.is_cloud:
+            self.conn.autocommit = False
+
+    def rollback(self):
+        if self.is_cloud:
+            self.conn.rollback()
+        else:
+            self.conn.rollback()
+
+    def end(self):
+        if self.is_cloud:
+            self.conn.autocommit = True
+
     def execute(self, query, params=()):
         try:
             if self.is_cloud:
@@ -213,40 +228,55 @@ def get_db():
         return db
 
 def init_db(db):
-    # ============ 【修复】彻底清理 PostgreSQL 残留旧主键约束与结构 ============
+    # ============ 【暴力修复】彻底清理 PostgreSQL 所有历史遗留主键与约束 ============
     if db.is_cloud:
         try:
-            # 动态清理指定表的所有主键约束（无论叫什么名字）
-            target_tables = [
-                "config_thresholds", "config_exam_multihit", "config_exam", "config_bonus_rules", 
-                "config_tasks", "config_shop", "config_exam_rules", "config_badges", 
-                "daily_records", "extra_points", "special_events", "redemptions"
-            ]
-            for tbl in target_tables:
-                try:
-                    # 查询该表所有的主键约束名
-                    res = db.execute("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name = ? AND constraint_type = 'PRIMARY KEY'", (tbl,)).fetchall()
-                    for row in res:
-                        cname = row["constraint_name"]
-                        db.execute(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {cname}")
-                except Exception:
-                    pass
+            # 强制拆除 daily_records
+            db.execute("ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_pkey CASCADE")
+            db.execute("ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_day_key CASCADE")
+            db.execute("ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_day_owner_id_key CASCADE")
+            db.execute("DROP INDEX IF EXISTS daily_records_pkey CASCADE")
+            db.execute("DROP INDEX IF EXISTS daily_records_day_key CASCADE")
+            db.execute("DROP INDEX IF EXISTS daily_records_day_owner_id_key CASCADE")
+
+            # 强制拆除其它配置表
+            db.execute("ALTER TABLE config_thresholds DROP CONSTRAINT IF EXISTS config_thresholds_pkey CASCADE")
+            db.execute("DROP INDEX IF EXISTS config_thresholds_pkey CASCADE")
+
+            db.execute("ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_pkey CASCADE")
+            db.execute("ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_subject_key CASCADE")
+            db.execute("DROP INDEX IF EXISTS config_exam_pkey CASCADE")
+            db.execute("DROP INDEX IF EXISTS config_exam_subject_key CASCADE")
+
+            db.execute("ALTER TABLE config_exam_multihit DROP CONSTRAINT IF EXISTS config_exam_multihit_pkey CASCADE")
+            db.execute("DROP INDEX IF EXISTS config_exam_multihit_pkey CASCADE")
             
-            # 修复 config_bonus_rules 遗留的 id 列 null 报错（补上缺失的序列默认值）
+            db.execute("ALTER TABLE config_bonus_rules DROP CONSTRAINT IF EXISTS config_bonus_rules_pkey CASCADE")
+            db.execute("DROP INDEX IF EXISTS config_bonus_rules_pkey CASCADE")
+
+            db.execute("ALTER TABLE config_tasks DROP CONSTRAINT IF EXISTS config_tasks_pkey CASCADE")
+            db.execute("ALTER TABLE config_shop DROP CONSTRAINT IF EXISTS config_shop_pkey CASCADE")
+            db.execute("ALTER TABLE config_badges DROP CONSTRAINT IF EXISTS config_badges_pkey CASCADE")
+            db.execute("ALTER TABLE special_events DROP CONSTRAINT IF EXISTS special_events_pkey CASCADE")
+            db.execute("ALTER TABLE extra_points DROP CONSTRAINT IF EXISTS extra_points_pkey CASCADE")
+            db.execute("ALTER TABLE redemptions DROP CONSTRAINT IF EXISTS redemptions_pkey CASCADE")
+
+            # 查杀 daily_records 上的其它隐藏唯一约束
+            res = db.execute("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name = 'daily_records' AND constraint_type = 'UNIQUE'").fetchall()
+            for row in res:
+                db.execute(f"ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS {row['constraint_name']} CASCADE")
+
+            # 修复 config_bonus_rules 遗留的 id 列 null 报错
             try:
                 db.execute("CREATE SEQUENCE IF NOT EXISTS config_bonus_rules_id_seq")
                 db.execute("ALTER TABLE config_bonus_rules ALTER COLUMN id SET DEFAULT nextval('config_bonus_rules_id_seq')")
             except Exception:
                 pass
                 
-            # 尝试移除 config_exam 可能存在的其它唯一约束
-            try:
-                db.execute("ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_subject_key")
-            except Exception:
-                pass
-                
             db.commit()
-        except Exception:
+            print("✅ 成功暴力清理所有旧约束！")
+        except Exception as e:
+            print(f"❌ 清理历史约束失败: {e}")
             pass
 
     tables_common = [
@@ -1420,38 +1450,40 @@ def main():
                         with st.form("makeup_form"):
                             selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
                             if _submit("使用 1 张补签卡并提交", **_stretch({"type": "primary"})):
-                                user_cards = get_makeup_cards_of(view_as)
-                                if user_cards <= 0:
-                                    st.error("余额不足，无法补签。")
-                                else:
-                                    try:
+                                # 严格事务：先关闭自动提交
+                                db.begin()
+                                try:
+                                    # 1. 检查卡余额
+                                    user_cards = get_makeup_cards_of(view_as)
+                                    if user_cards <= 0:
+                                        db.end()
+                                        st.error("余额不足，无法补签。")
+                                    else:
                                         t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
                                         
-                                        # 先查是否已有记录，改为 UPDATE 或 INSERT，防止失败时数据丢失
-                                        existing_row = db.execute("SELECT day FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as)).fetchone()
-                                        if existing_row:
-                                            db.execute(
-                                                "UPDATE daily_records SET done_tasks=?, base_score=?, bonus_score=0, bonus_detail='{}', total_score=?, updated_at=?, basic_thr=?, full_thr=? WHERE day=? AND owner_id=?",
-                                                (json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"], sel_date.isoformat(), view_as)
-                                            )
-                                        else:
-                                            db.execute(
-                                                "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
-                                                (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
-                                            )
-                                        db.commit()
+                                        # 2. 暴力覆盖写入记录
+                                        db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
+                                        db.execute(
+                                            "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
+                                            (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
+                                        )
                                         
-                                        # 记录写入成功后，再扣除补签卡
+                                        # 3. 扣除卡券
                                         db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (view_as,))
+                                        
+                                        # 4. 一起提交
                                         db.commit()
+                                        db.end() # 恢复自动提交
                                         
                                         recalc_all_bonus(db, view_as)
                                         settle_longterm_bonus(db, view_as, now.isoformat())
                                         st.cache_data.clear()
                                         st.success("补签成功！")
                                         st.rerun()
-                                    except RuntimeError as e:
-                                        st.error(f"补签失败：{str(e)}")
+                                except Exception as e:
+                                    db.rollback() # 一旦报错，回滚事务
+                                    db.end()      # 恢复自动提交
+                                    st.error(f"补签失败，请重试：{str(e)}")
                     else:
                         st.info("最近 7 天全勤！")
                 else:
@@ -1536,21 +1568,25 @@ def main():
                     if st.session_state.get(confirm_key):
                         cc1, cc2 = st.columns(2)
                         if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", **_stretch({"type": "primary"})):
+                            # 严格事务
+                            db.begin()
                             try:
                                 curr_bal = get_balance(view_as)
                                 if curr_bal["balance"] < cost:
+                                    db.end()
                                     st.error("积分不足，兑换失败。")
                                 else:
-                                    # 先写兑换记录，成功后再发卡/改属性
                                     db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
-                                    db.commit()
                                     if name == "补签卡":
                                         db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
-                                        db.commit()
+                                    db.commit()
+                                    db.end()
                                     st.session_state[confirm_key] = False
                                     st.cache_data.clear(); st.success("兑换成功！"); st.rerun()
-                            except RuntimeError as e:
-                                st.error(str(e))
+                            except Exception as e:
+                                db.rollback()
+                                db.end()
+                                st.error(f"兑换失败：{str(e)}")
                         if cc2.button("取消", key=f"no_{view_as}_{name}", **_stretch({})):
                             st.session_state[confirm_key] = False
                             st.rerun()
