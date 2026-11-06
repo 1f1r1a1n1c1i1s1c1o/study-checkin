@@ -1135,59 +1135,71 @@ def main():
 
         bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
 
+        # 初始化 view_as 和 view_role
         view_as = current_user
+        view_role = current_role
 
         if current_role == "user":
             view_as = current_user
+            view_role = "user"
+
         elif current_role == "host":
             try:
-                visible_users = get_visible_users(current_user, current_role)
+                children = db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()
+                child_names = [r["username"] for r in children]
             except Exception:
-                visible_users = []
-            if visible_users:
-                view_as = st.selectbox("选择孩子", visible_users, index=0)
-            else:
+                child_names = []
+                
+            if not child_names:
                 view_as = None
+                st.warning("暂无绑定的孩子，请联系管理员绑定。")
+            else:
+                view_as = st.selectbox("选择你要管理/查看的孩子", child_names, index=0)
+                view_role = "user"
+
         elif current_role == "admin":
-            all_usernames = [u["username"] for u in all_users_data]
-            if current_user not in all_usernames:
-                all_usernames = [current_user] + all_usernames
+            try:
+                all_users = db.execute("SELECT username, role FROM users").fetchall()
+            except Exception:
+                all_users = []
             
-            default_idx = all_usernames.index(current_user) if current_user in all_usernames else 0
-            admin_view_as = st.selectbox("管理员特权：切换账号", all_usernames, index=default_idx)
+            user_list = [u["username"] for u in all_users]
+            if current_user in user_list:
+                user_list.remove(current_user)
+                user_list.insert(0, current_user)
+                
+            selected_target = st.selectbox("管理员特权：选择操作对象", user_list, index=0)
             
             try:
-                target_u_row = db.execute("SELECT role FROM users WHERE username=?", (admin_view_as,)).fetchone()
-                target_role = target_u_row["role"] if target_u_row else "user"
+                target_role_row = db.execute("SELECT role FROM users WHERE username=?", (selected_target,)).fetchone()
+                target_role = target_role_row["role"] if target_role_row else "user"
             except Exception:
                 target_role = "user"
-                
+
             if target_role == "host":
                 try:
-                    host_bound_users = db.execute("SELECT username FROM users WHERE host_id=?", (admin_view_as,)).fetchall()
-                    bound_names = [u["username"] for u in host_bound_users]
+                    children = db.execute("SELECT username FROM users WHERE host_id=?", (selected_target,)).fetchall()
+                    child_names = [r["username"] for r in children]
                 except Exception:
-                    bound_names = []
-                
-                if bound_names:
-                    selected_child = st.selectbox("穿透管理：该 Host 名下的孩子", ["(仅查看 Host 设置)"] + bound_names, index=0)
-                    if selected_child != "(仅查看 Host 设置)":
-                        view_as = selected_child
+                    child_names = []
+                    
+                if child_names:
+                    options = ["(仅配置该家长的属性)"] + child_names
+                    selected_child = st.selectbox(f"穿透管理：{selected_target} 名下的孩子", options, index=0)
+                    
+                    if selected_child == "(仅配置该家长的属性)":
+                        view_as = selected_target
+                        view_role = "host"
                     else:
-                        view_as = admin_view_as
+                        view_as = selected_child
+                        view_role = "user"
                 else:
-                    view_as = admin_view_as
+                    st.caption("该家长名下暂无孩子")
+                    view_as = selected_target
+                    view_role = "host"
             else:
-                view_as = admin_view_as
-
-        if view_as:
-            try:
-                view_user_row = db.execute("SELECT role FROM users WHERE username=?", (view_as,)).fetchone()
-                view_role = view_user_row["role"] if view_user_row else "user"
-            except Exception:
-                view_role = "user"
-        else:
-            view_role = "user"
+                view_as = selected_target
+                view_role = target_role
 
         if view_as:
             try:
@@ -1345,12 +1357,15 @@ def main():
     base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
     base_mobile = ["打卡", "商城", "兑换"]
 
-    if view_role == "admin":
+    if current_role == "admin":
         tabs = base_desktop + ["系统设置"]
-    elif view_role == "host":
-        tabs = ["历史与图表", "系统设置"]
+    elif current_role == "host":
+        tabs = ["历史与图表", "偶发", "系统设置"]
     else:
-        tabs = base_desktop
+        if is_mobile_mode:
+            tabs = base_mobile
+        else:
+            tabs = ["打卡", "历史与图表", "商城", "兑换", "考试", "事件"]
 
     tab_objs = st.tabs(tabs)
     tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
@@ -1442,6 +1457,9 @@ def main():
     # ============ 偶发 ============
     if "偶发" in tab_dict:
         with tab_dict["偶发"]:
+            if current_role == "user":
+                st.warning("只有家长或管理员才能添加偶发事件哦。")
+                st.stop()
             st.subheader("偶发事件加/扣分")
             with st.form("extra_point_form"):
                 col1, col2, col3 = st.columns([4, 2, 2])
@@ -1476,8 +1494,10 @@ def main():
             st.subheader("历史与图表分析")
             view_makeup_hist = get_makeup_cards_of(view_as)
             
-            if view_role == "host":
+            if current_role == "host" and view_role == "user":
                 st.info("💡 补签请让孩子在自己的账号里操作。")
+            elif view_role == "host":
+                st.info("💡 该账号为家长，请切换选择其名下的孩子进行操作。")
             else:
                 if view_makeup_hist > 0:
                     st.markdown(f"🎫 **当前配置对象有 {view_makeup_hist} 张补签卡，可用于补全最近 7 天内漏掉的打卡：**")
@@ -1727,10 +1747,11 @@ def main():
         with tab_dict["系统设置"]:
             st.subheader("系统设置")
 
-            if view_role == "admin":
-                st.info(f"当前正在配置：**{html.escape(view_as)}**")
-            elif view_role == "host":
-                st.info(f"当前正在配置：**{html.escape(view_as)}**（你绑定的孩子）")
+            role_names = {"admin": "管理员", "host": "家长", "user": "普通用户/孩子"}
+            if view_as == current_user:
+                st.info(f"当前正在配置：**{html.escape(view_as)}**（你自己）")
+            else:
+                st.info(f"当前正在配置：**{html.escape(view_as)}**（身份：{role_names.get(view_role, view_role)}）")
 
             # ---- 1. 修改每日任务 ----
             st.markdown("### 1. 修改每日任务")
