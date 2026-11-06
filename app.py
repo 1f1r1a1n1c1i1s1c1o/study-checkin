@@ -1184,17 +1184,12 @@ def main():
                     child_names = []
                     
                 if child_names:
-                    options = ["(仅配置该家长的属性)"] + child_names
-                    selected_child = st.selectbox(f"穿透管理：{selected_target} 名下的孩子", options, index=0)
-                    
-                    if selected_child == "(仅配置该家长的属性)":
-                        view_as = selected_target
-                        view_role = "host"
-                    else:
-                        view_as = selected_child
-                        view_role = "user"
+                    # 默认选第一个孩子
+                    selected_child = st.selectbox(f"穿透管理：{selected_target} 名下的孩子", child_names, index=0)
+                    view_as = selected_child
+                    view_role = "user"
                 else:
-                    st.caption("该家长名下暂无孩子")
+                    st.caption("该家长名下暂无孩子，当前配置的是家长本人")
                     view_as = selected_target
                     view_role = "host"
             else:
@@ -1210,7 +1205,7 @@ def main():
                 target_tz = 8.0
             view_today = get_user_today(target_tz)
             view_makeup_sidebar = get_makeup_cards_of(view_as)
-            role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(view_role, view_role)
+            role_display = {"admin": "管理员", "host": "家长", "user": "孩子"}.get(view_role, view_role)
             st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
             
             try:
@@ -1221,8 +1216,8 @@ def main():
             if view_role != "host":
                 st.metric("当前可用积分", f"{bal['balance']:.1f}")
         else:
-            role_display = "Host"
-            st.info(f"当前身份：{html.escape(current_user)} (Host)\n\n暂无绑定的孩子。")
+            role_display = "家长"
+            st.info(f"当前身份：{html.escape(current_user)} (家长)\n\n暂无绑定的孩子。")
 
         if not is_mobile_mode and (view_role == "admin" or (view_role == "host" and view_as)):
             with st.expander("专注计时器 (番茄钟)", expanded=False):
@@ -1354,14 +1349,22 @@ def main():
         st.info("暂无绑定的孩子，请联系管理员绑定后再使用。")
         st.stop()
 
+    # ============ 重构 Tab 生成逻辑 ============
     base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
     base_mobile = ["打卡", "商城", "兑换"]
 
+    # 严格根据当前登录人的角色（current_role）和是否手机模式来决定页面显示什么
     if current_role == "admin":
-        tabs = base_desktop + ["系统设置"]
+        if is_mobile_mode:
+            tabs = base_mobile + ["系统设置"]
+        else:
+            tabs = base_desktop + ["系统设置"]
+            
     elif current_role == "host":
+        # 家长专属页面，不提供打卡等功能，但有给孩子处理偶发和配置的权限
         tabs = ["历史与图表", "偶发", "系统设置"]
-    else:
+        
+    else: # current_role == "user" (孩子登录)
         if is_mobile_mode:
             tabs = base_mobile
         else:
@@ -1747,7 +1750,7 @@ def main():
         with tab_dict["系统设置"]:
             st.subheader("系统设置")
 
-            role_names = {"admin": "管理员", "host": "家长", "user": "普通用户/孩子"}
+            role_names = {"admin": "管理员", "host": "家长", "user": "孩子"}
             if view_as == current_user:
                 st.info(f"当前正在配置：**{html.escape(view_as)}**（你自己）")
             else:
