@@ -213,12 +213,40 @@ def get_db():
         return db
 
 def init_db(db):
-    # ============ 【修复】彻底清理 PostgreSQL 残留旧主键约束 ============
-    # 旧版本曾把 weekday / hit_count 单独设为主键，导致多用户/多档位插入冲突。
+    # ============ 【修复】彻底清理 PostgreSQL 残留旧主键约束与结构 ============
     if db.is_cloud:
         try:
-            db.execute("ALTER TABLE config_thresholds DROP CONSTRAINT IF EXISTS config_thresholds_pkey")
-            db.execute("ALTER TABLE config_exam_multihit DROP CONSTRAINT IF EXISTS config_exam_multihit_pkey")
+            # 1. 清理旧版单列主键约束，防止唯一性冲突
+            drop_constraints = [
+                "config_thresholds_pkey",
+                "config_exam_multihit_pkey",
+                "config_exam_pkey",
+                "config_bonus_rules_pkey",
+                "config_tasks_pkey",
+                "config_shop_pkey",
+                "config_exam_rules_pkey",
+                "config_badges_pkey"
+            ]
+            for c in drop_constraints:
+                tbl = c.replace("_pkey", "")
+                try:
+                    db.execute(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {c}")
+                except Exception:
+                    pass
+            
+            # 2. 修复 config_bonus_rules 遗留的 id 列 null 报错（补上缺失的序列默认值）
+            try:
+                db.execute("CREATE SEQUENCE IF NOT EXISTS config_bonus_rules_id_seq")
+                db.execute("ALTER TABLE config_bonus_rules ALTER COLUMN id SET DEFAULT nextval('config_bonus_rules_id_seq')")
+            except Exception:
+                pass
+                
+            # 3. 尝试移除 config_exam 可能存在的其它唯一约束
+            try:
+                db.execute("ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_subject_key")
+            except Exception:
+                pass
+                
             db.commit()
         except Exception:
             pass
