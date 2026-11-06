@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64
+import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import streamlit as st
@@ -213,6 +213,16 @@ def get_db():
         return db
 
 def init_db(db):
+    # ============ 【修复】彻底清理 PostgreSQL 残留旧主键约束 ============
+    # 旧版本曾把 weekday / hit_count 单独设为主键，导致多用户/多档位插入冲突。
+    if db.is_cloud:
+        try:
+            db.execute("ALTER TABLE config_thresholds DROP CONSTRAINT IF EXISTS config_thresholds_pkey")
+            db.execute("ALTER TABLE config_exam_multihit DROP CONSTRAINT IF EXISTS config_exam_multihit_pkey")
+            db.commit()
+        except Exception:
+            pass
+
     tables_common = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
@@ -380,7 +390,6 @@ def init_db(db):
         except Exception: pass
 
 def init_old_admin_data(db, owner_id):
-    # 【修复】：先清理旧配置，防止主键冲突
     try:
         db.execute("DELETE FROM config_tasks WHERE owner_id=?", (owner_id,))
         db.execute("DELETE FROM config_thresholds WHERE owner_id=?", (owner_id,))
@@ -401,7 +410,6 @@ def init_old_admin_data(db, owner_id):
     
     for i in range(7):
         for t in BASE_TASKS:
-            # 【修复】：把 owner_id 加入 task_id，确保跨用户绝对唯一
             task_id = f"{owner_id}_{t[0]}_d{i}"
             db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", 
                        (task_id, i, owner_id, t[1], t[2], t[3]))
@@ -1043,7 +1051,6 @@ def main():
         st.title("学习打卡")
         is_mobile_mode = st.checkbox("📱 手机精简模式", value=False)
 
-        # 默认值兜底
         bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
 
         try:
@@ -1087,7 +1094,6 @@ def main():
             role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
             st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
             
-            # 尝试获取余额
             try:
                 bal = get_balance(view_as)
             except Exception:
@@ -1609,59 +1615,99 @@ def main():
             # ---- 1. 修改每日任务 ----
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
-            try:
-                tasks_df = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=?", (sel_wd, view_as)).fetchall()
-            except Exception:
-                tasks_df = []
 
-            edited_tasks = st.data_editor(
-                [dict(t) for t in tasks_df],
-                column_config={
-                    "id": st.column_config.TextColumn("任务ID", required=True),
-                    "weekday": None, "owner_id": None,
-                    "category": st.column_config.TextColumn("分类"),
-                    "name": st.column_config.TextColumn("任务名称", required=True),
-                    "points": st.column_config.NumberColumn("分数", min_value=0.0, step=0.5)
-                },
-                num_rows="dynamic", use_container_width=True, key=f"edit_task_{view_as}_{sel_wd}"
-            )
-            if st.button("保存任务修改", **_stretch({})):
-                try:
-                    db.execute("DELETE FROM config_tasks WHERE weekday=? AND owner_id=?", (sel_wd, view_as))
-                    for t in edited_tasks:
-                        if t.get("id") and t.get("name"):
-                            db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)",
-                                       (t["id"], sel_wd, view_as, t.get("category") or "", t["name"], float(t.get("points") or 0)))
-                    db.commit(); st.cache_data.clear(); st.success("任务已更新！"); st.rerun()
-                except RuntimeError as e:
-                    st.error(str(e))
+            try:
+                tasks_list = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=? ORDER BY category ASC, name ASC", (sel_wd, view_as)).fetchall()
+            except Exception:
+                tasks_list = []
+
+            if tasks_list:
+                st.markdown(f"**{WEEKDAY_CN[sel_wd]} 当前任务（共 {len(tasks_list)} 项）**")
+                for t in tasks_list:
+                    tc1, tc2, tc3, tc4 = st.columns([2, 4, 2, 1])
+                    tc1.write(f"`{html.escape(str(t.get('category') or ''))}`")
+                    tc2.write(f"**{html.escape(str(t['name']))}**")
+                    tc3.write(f"{float(t['points'] or 0)} 分")
+                    if tc4.button("🗑 删除", key=f"del_task_{view_as}_{sel_wd}_{t['id']}", **_stretch({"type": "primary"})):
+                        try:
+                            db.execute("DELETE FROM config_tasks WHERE id=? AND owner_id=?", (t["id"], view_as))
+                            db.commit(); st.cache_data.clear(); st.success("已删除该任务"); st.rerun()
+                        except RuntimeError as e:
+                            st.error(str(e))
+            else:
+                st.caption("当前星期暂无任务。")
+
+            with st.form(f"add_task_form_{view_as}_{sel_wd}", clear_on_submit=True):
+                st.markdown("**➕ 新增任务**")
+                tc1, tc2, tc3 = st.columns([2, 3, 2])
+                new_cat = tc1.text_input("分类", placeholder="如：校内", key=f"new_task_cat_{view_as}_{sel_wd}")
+                new_name = tc2.text_input("任务名称", placeholder="如：背单词", key=f"new_task_name_{view_as}_{sel_wd}")
+                new_pts_str = tc3.text_input("分数", placeholder="如：2", key=f"new_task_pts_{view_as}_{sel_wd}")
+                if _submit("➕ 添加任务", **_stretch({"type": "primary"})):
+                    if not new_name.strip():
+                        st.error("任务名称不能为空")
+                    else:
+                        pts_val = None
+                        try:
+                            pts_val = float((new_pts_str or "0").strip() or "0")
+                        except ValueError:
+                            st.error("分数必须为数字")
+                        if pts_val is not None:
+                            try:
+                                task_id = uuid.uuid4().hex
+                                db.execute(
+                                    "INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)",
+                                    (task_id, sel_wd, view_as, new_cat.strip(), new_name.strip(), float(pts_val))
+                                )
+                                db.commit(); st.cache_data.clear(); st.success("任务已添加！"); st.rerun()
+                            except RuntimeError as e:
+                                st.error(str(e))
 
             # ---- 2. 修改商城奖励 ----
             st.divider()
             st.markdown("### 2. 修改商城奖励")
             try:
-                shop_df = db.execute("SELECT id, name, cost FROM config_shop WHERE owner_id=?", (view_as,)).fetchall()
+                shop_list = db.execute("SELECT * FROM config_shop WHERE owner_id=? ORDER BY id ASC", (view_as,)).fetchall()
             except Exception:
-                shop_df = []
+                shop_list = []
 
-            edited_shop = st.data_editor(
-                [dict(s) for s in shop_df],
-                column_config={
-                    "id": None,
-                    "name": st.column_config.TextColumn("奖励名称", required=True),
-                    "cost": st.column_config.NumberColumn("所需积分", min_value=0.0, step=1.0)
-                },
-                num_rows="dynamic", use_container_width=True, key=f"edit_shop_{view_as}"
-            )
-            if st.button("保存商城修改", **_stretch({})):
-                try:
-                    db.execute("DELETE FROM config_shop WHERE owner_id=?", (view_as,))
-                    for s in edited_shop:
-                        if s.get("name") and s.get("cost") is not None:
-                            db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (view_as, s["name"], float(s["cost"])))
-                    db.commit(); st.cache_data.clear(); st.success("商城已更新！"); st.rerun()
-                except RuntimeError as e:
-                    st.error(str(e))
+            if shop_list:
+                for s in shop_list:
+                    sc1, sc2, sc3 = st.columns([5, 2, 1])
+                    sc1.write(f"**{html.escape(str(s['name']))}**")
+                    sc2.write(f"{float(s['cost'] or 0)} 分")
+                    if sc3.button("🗑 删除", key=f"del_shop_{view_as}_{s['id']}", **_stretch({"type": "primary"})):
+                        try:
+                            db.execute("DELETE FROM config_shop WHERE id=? AND owner_id=?", (s["id"], view_as))
+                            db.commit(); st.cache_data.clear(); st.success("已删除该奖励"); st.rerun()
+                        except RuntimeError as e:
+                            st.error(str(e))
+            else:
+                st.caption("暂无商城奖励。")
+
+            with st.form(f"add_shop_form_{view_as}", clear_on_submit=True):
+                st.markdown("**➕ 新增奖励**")
+                sc1, sc2 = st.columns([3, 2])
+                new_shop_name = sc1.text_input("奖励名称", placeholder="如：专属夸夸", key=f"new_shop_name_{view_as}")
+                new_shop_cost_str = sc2.text_input("所需积分", placeholder="如：5", key=f"new_shop_cost_{view_as}")
+                if _submit("➕ 添加奖励", **_stretch({"type": "primary"})):
+                    if not new_shop_name.strip():
+                        st.error("奖励名称不能为空")
+                    else:
+                        cost_val = None
+                        try:
+                            cost_val = float((new_shop_cost_str or "0").strip() or "0")
+                        except ValueError:
+                            st.error("所需积分必须为数字")
+                        if cost_val is not None:
+                            try:
+                                db.execute(
+                                    "INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)",
+                                    (view_as, new_shop_name.strip(), float(cost_val))
+                                )
+                                db.commit(); st.cache_data.clear(); st.success("奖励已添加！"); st.rerun()
+                            except RuntimeError as e:
+                                st.error(str(e))
 
             # ---- 3. 修改考试科目 ----
             st.divider()
@@ -1671,54 +1717,100 @@ def main():
             except Exception:
                 exam_config = {}
 
-            df_exam_data = []
-            for k, v in exam_config.items():
-                max_s = v.get("max_score") if v["type"] == "score" else None
-                step_s = v.get("step") if v["type"] == "score" else None
-                df_exam_data.append({"科目": k, "类型": v["type"], "满分": max_s, "目标": str(v["target"]), "分差": step_s, "单档奖励": v["step_points"]})
-            df_exam = pd.DataFrame(df_exam_data)
-            if df_exam.empty:
-                df_exam = pd.DataFrame(columns=["科目", "类型", "满分", "目标", "分差", "单档奖励"])
+            if exam_config:
+                for sub, cfg in exam_config.items():
+                    ec1, ec2, ec3, ec4 = st.columns([2, 4, 2, 1])
+                    ec1.write(f"**{html.escape(str(sub))}**")
+                    if cfg.get("type") == "score":
+                        ec2.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                    else:
+                        ec2.write(f"等级制 | 目标 {cfg.get('target')}")
+                    ec3.write(f"单档 {cfg.get('step_points', 0)} 分")
+                    if ec4.button("🗑 删除", key=f"del_exam_{view_as}_{sub}", **_stretch({"type": "primary"})):
+                        try:
+                            db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (sub, view_as))
+                            db.commit(); st.cache_data.clear(); st.success("已删除该科目"); st.rerun()
+                        except RuntimeError as e:
+                            st.error(str(e))
+            else:
+                st.caption("暂无考试科目。")
 
-            edited_exam = st.data_editor(
-                df_exam,
-                column_config={
-                    "科目": st.column_config.TextColumn("科目", required=True),
-                    "类型": st.column_config.SelectboxColumn("类型", options=["score", "grade"], required=True),
-                    "满分": st.column_config.NumberColumn("满分", min_value=0.0, step=1.0),
-                    "目标": st.column_config.TextColumn("目标", required=True),
-                    "分差": st.column_config.NumberColumn("分差", min_value=0.0, step=1.0),
-                    "单档奖励": st.column_config.NumberColumn("单档奖励", min_value=0.0, step=0.5)
-                }, num_rows="dynamic", use_container_width=True, key=f"edit_exam_{view_as}"
+            st.markdown("**➕ 新增科目**")
+            exam_type_choice = st.radio(
+                "选择类型", ["score", "grade"],
+                format_func=lambda x: "分数制" if x == "score" else "等级制",
+                horizontal=True, key=f"new_exam_type_{view_as}"
             )
 
-            if st.button("保存考试科目修改", **_stretch({})):
-                try:
-                    db.execute("DELETE FROM config_exam WHERE owner_id=?", (view_as,))
-                    has_error = False
-                    for _, row in edited_exam.iterrows():
-                        if pd.notna(row["科目"]) and row["科目"]:
-                            sub = row["科目"]; e_type = str(row["类型"]).strip().lower(); e_target = str(row["目标"]).strip()
-                            if e_type not in ["score", "grade"]:
-                                st.error(f"科目 {sub} 类型错误"); has_error = True; break
-                            if e_type == "score":
-                                try:
-                                    e_target_val = float(e_target)
-                                except ValueError:
-                                    st.error(f"科目 {sub} 目标必须是数字"); has_error = True; break
-                                cfg = {"type": "score", "max_score": float(row["满分"] or 150), "target": e_target_val,
-                                       "step": float(row["分差"] or 0), "step_points": float(row["单档奖励"] or 0)}
+            if exam_type_choice == "score":
+                with st.form(f"add_exam_score_form_{view_as}", clear_on_submit=True):
+                    ec1, ec2, ec3 = st.columns(3)
+                    new_exam_sub = ec1.text_input("科目名称", placeholder="如：语文", key=f"new_exam_sub_s_{view_as}")
+                    new_exam_max_str = ec2.text_input("满分", placeholder="如：150", key=f"new_exam_max_{view_as}")
+                    new_exam_target_str = ec3.text_input("目标分数", placeholder="如：105", key=f"new_exam_target_{view_as}")
+                    ec4, ec5 = st.columns(2)
+                    new_exam_step_str = ec4.text_input("分差", placeholder="如：3", key=f"new_exam_step_{view_as}")
+                    new_exam_step_pts_str = ec5.text_input("单档奖励", placeholder="如：2", key=f"new_exam_step_pts_{view_as}")
+                    if _submit("➕ 添加科目", **_stretch({"type": "primary"})):
+                        if not new_exam_sub.strip():
+                            st.error("科目名称不能为空")
+                        else:
+                            try:
+                                max_val = float((new_exam_max_str or "150").strip() or "150")
+                                target_val = float((new_exam_target_str or "").strip())
+                                step_val = float((new_exam_step_str or "0").strip() or "0")
+                                step_pts_val = float((new_exam_step_pts_str or "0").strip() or "0")
+                            except ValueError:
+                                st.error("满分/目标/分差/单档奖励必须为数字")
                             else:
-                                if e_target not in GRADES:
-                                    st.error(f"科目 {sub} 目标必须在 11 档内"); has_error = True; break
-                                cfg = {"type": "grade", "target": e_target, "step_points": float(row["单档奖励"] or 0)}
-                            db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (sub, view_as, json.dumps(cfg)))
-                    if has_error:
-                        db.commit()
-                    else:
-                        db.commit(); st.cache_data.clear(); st.success("科目已更新！"); st.rerun()
-                except RuntimeError as e:
-                    st.error(str(e))
+                                try:
+                                    existing_row = db.execute(
+                                        "SELECT * FROM config_exam WHERE subject=? AND owner_id=?",
+                                        (new_exam_sub.strip(), view_as)
+                                    ).fetchone()
+                                    if existing_row:
+                                        st.warning("该科目已存在，请先删除旧配置。")
+                                    else:
+                                        cfg = {"type": "score", "max_score": max_val, "target": target_val,
+                                               "step": step_val, "step_points": step_pts_val}
+                                        db.execute(
+                                            "INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)",
+                                            (new_exam_sub.strip(), view_as, json.dumps(cfg))
+                                        )
+                                        db.commit(); st.cache_data.clear(); st.success("科目已添加！"); st.rerun()
+                                except RuntimeError as e:
+                                    st.error(str(e))
+            else:
+                with st.form(f"add_exam_grade_form_{view_as}", clear_on_submit=True):
+                    ec1, ec2, ec3 = st.columns([3, 3, 2])
+                    new_exam_sub = ec1.text_input("科目名称", placeholder="如：语文", key=f"new_exam_sub_g_{view_as}")
+                    new_exam_target = ec2.selectbox("目标等级", GRADES, key=f"new_exam_target_g_{view_as}")
+                    new_exam_step_pts_str = ec3.text_input("单档奖励", placeholder="如：2", key=f"new_exam_step_pts_g_{view_as}")
+                    if _submit("➕ 添加科目", **_stretch({"type": "primary"})):
+                        if not new_exam_sub.strip():
+                            st.error("科目名称不能为空")
+                        else:
+                            try:
+                                step_pts_val = float((new_exam_step_pts_str or "0").strip() or "0")
+                            except ValueError:
+                                st.error("单档奖励必须为数字")
+                            else:
+                                try:
+                                    existing_row = db.execute(
+                                        "SELECT * FROM config_exam WHERE subject=? AND owner_id=?",
+                                        (new_exam_sub.strip(), view_as)
+                                    ).fetchone()
+                                    if existing_row:
+                                        st.warning("该科目已存在，请先删除旧配置。")
+                                    else:
+                                        cfg = {"type": "grade", "target": new_exam_target, "step_points": step_pts_val}
+                                        db.execute(
+                                            "INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)",
+                                            (new_exam_sub.strip(), view_as, json.dumps(cfg))
+                                        )
+                                        db.commit(); st.cache_data.clear(); st.success("科目已添加！"); st.rerun()
+                                except RuntimeError as e:
+                                    st.error(str(e))
 
             # ---- 4. 修改多科达成奖励 ----
             st.divider()
@@ -1727,27 +1819,51 @@ def main():
                 mh_list = get_exam_multihit(view_as)
             except Exception:
                 mh_list = []
-            mh_df = pd.DataFrame(mh_list)
-            if mh_df.empty:
-                mh_df = pd.DataFrame(columns=["hit_count", "points"])
-            edited_mh = st.data_editor(
-                mh_df,
-                column_config={
-                    "hit_count": st.column_config.NumberColumn("达成科目数", min_value=1, step=1),
-                    "points": st.column_config.NumberColumn("奖励分数", min_value=0.0, step=0.5)
-                },
-                num_rows="dynamic", use_container_width=True, key=f"edit_mh_{view_as}"
-            )
-            if st.button("保存多科奖励修改", **_stretch({})):
-                try:
-                    db.execute("DELETE FROM config_exam_multihit WHERE owner_id=?", (view_as,))
-                    for _, row in edited_mh.iterrows():
-                        if pd.notna(row["hit_count"]) and pd.notna(row["points"]):
-                            db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)",
-                                       (int(row["hit_count"]), view_as, float(row["points"])))
-                    db.commit(); st.cache_data.clear(); st.success("多科奖励已更新！"); st.rerun()
-                except RuntimeError as e:
-                    st.error(str(e))
+
+            if mh_list:
+                for mh in mh_list:
+                    mc1, mc2, mc3 = st.columns([4, 3, 1])
+                    mc1.write(f"达成 **{mh['hit_count']}** 门及以上")
+                    mc2.write(f"+{mh['points']} 分")
+                    if mc3.button("🗑 删除", key=f"del_mh_{view_as}_{mh['hit_count']}", **_stretch({"type": "primary"})):
+                        try:
+                            db.execute("DELETE FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (mh["hit_count"], view_as))
+                            db.commit(); st.cache_data.clear(); st.success("已删除该档位"); st.rerun()
+                        except RuntimeError as e:
+                            st.error(str(e))
+            else:
+                st.caption("暂无多科达成奖励配置。")
+
+            with st.form(f"add_mh_form_{view_as}", clear_on_submit=True):
+                st.markdown("**➕ 新增多科奖励档位**")
+                mc1, mc2 = st.columns(2)
+                new_mh_count_str = mc1.text_input("达成科目数", placeholder="如：3", key=f"new_mh_count_{view_as}")
+                new_mh_pts_str = mc2.text_input("奖励分数", placeholder="如：2", key=f"new_mh_pts_{view_as}")
+                if _submit("➕ 添加档位", **_stretch({"type": "primary"})):
+                    try:
+                        count_val = int((new_mh_count_str or "").strip())
+                        pts_val = float((new_mh_pts_str or "0").strip() or "0")
+                    except ValueError:
+                        st.error("达成科目数必须为整数，奖励分数必须为数字")
+                    else:
+                        if count_val < 1:
+                            st.error("达成科目数必须 ≥ 1")
+                        else:
+                            try:
+                                existing = db.execute(
+                                    "SELECT * FROM config_exam_multihit WHERE hit_count=? AND owner_id=?",
+                                    (count_val, view_as)
+                                ).fetchone()
+                                if existing:
+                                    st.warning("该达成科目数已存在，请先删除旧配置。")
+                                else:
+                                    db.execute(
+                                        "INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)",
+                                        (count_val, view_as, float(pts_val))
+                                    )
+                                    db.commit(); st.cache_data.clear(); st.success("档位已添加！"); st.rerun()
+                            except RuntimeError as e:
+                                st.error(str(e))
 
             # ---- 5. 修改阈值与 Bonus 规则 ----
             st.divider()
@@ -1820,7 +1936,7 @@ def main():
             if current_role == "admin":
                 with st.form("add_badge_form"):
                     c1, c2, c3 = st.columns([3, 2, 2])
-                    b_name = c1.text_input("徽章名称")
+                    b_name = c1.text_input("徽章名称", placeholder="如：持之以恒")
                     b_type = c2.selectbox("达成条件", options=["days", "points", "perfect", "exam_hits"],
                                           format_func=lambda x: {"days": "累计打卡天数", "points": "累计赚取积分", "perfect": "完美周/月次数", "exam_hits": "单次考试达成科目数"}.get(x, x))
                     b_val = c3.number_input("达成数值", min_value=1.0, step=1.0)
@@ -1851,7 +1967,7 @@ def main():
                         c2.write(f"**{html.escape(b['name'])}**")
                         type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
                         c3.write(f"条件：{type_cn} ≥ {b['cond_val']}")
-                        if c4.button("删除", key=f"del_badge_{b['id']}", **_stretch({})):
+                        if c4.button("删除", key=f"del_badge_{b['id']}", **_stretch({"type": "primary"})):
                             try:
                                 db.execute("DELETE FROM config_badges WHERE id=?", (b["id"],))
                                 db.commit(); st.cache_data.clear(); st.rerun()
@@ -2009,7 +2125,6 @@ def main():
                                 st.session_state.pop(pending_key, None)
                                 st.rerun()
 
-                        # Host 降级确认弹窗
                         if st.session_state.get(f"confirm_demote_{uname}"):
                             target_role = st.session_state[f"confirm_demote_{uname}"]
                             try:
