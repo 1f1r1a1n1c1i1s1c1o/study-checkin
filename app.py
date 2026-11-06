@@ -216,36 +216,30 @@ def init_db(db):
     # ============ 【修复】彻底清理 PostgreSQL 残留旧主键约束与结构 ============
     if db.is_cloud:
         try:
-            # 1. 清理旧版单列主键约束，防止唯一性冲突
-            drop_constraints = [
-                "config_thresholds_pkey",
-                "config_exam_multihit_pkey",
-                "config_exam_pkey",
-                "config_bonus_rules_pkey",
-                "config_tasks_pkey",
-                "config_shop_pkey",
-                "config_exam_rules_pkey",
-                "config_badges_pkey",
-                "daily_records_pkey",
-                "extra_points_pkey",
-                "special_events_pkey",
-                "redemptions_pkey",
+            # 动态清理指定表的所有主键约束（无论叫什么名字）
+            target_tables = [
+                "config_thresholds", "config_exam_multihit", "config_exam", "config_bonus_rules", 
+                "config_tasks", "config_shop", "config_exam_rules", "config_badges", 
+                "daily_records", "extra_points", "special_events", "redemptions"
             ]
-            for c in drop_constraints:
-                tbl = c.replace("_pkey", "")
+            for tbl in target_tables:
                 try:
-                    db.execute(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {c}")
+                    # 查询该表所有的主键约束名
+                    res = db.execute("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name = ? AND constraint_type = 'PRIMARY KEY'", (tbl,)).fetchall()
+                    for row in res:
+                        cname = row["constraint_name"]
+                        db.execute(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {cname}")
                 except Exception:
                     pass
             
-            # 2. 修复 config_bonus_rules 遗留的 id 列 null 报错（补上缺失的序列默认值）
+            # 修复 config_bonus_rules 遗留的 id 列 null 报错（补上缺失的序列默认值）
             try:
                 db.execute("CREATE SEQUENCE IF NOT EXISTS config_bonus_rules_id_seq")
                 db.execute("ALTER TABLE config_bonus_rules ALTER COLUMN id SET DEFAULT nextval('config_bonus_rules_id_seq')")
             except Exception:
                 pass
                 
-            # 3. 尝试移除 config_exam 可能存在的其它唯一约束
+            # 尝试移除 config_exam 可能存在的其它唯一约束
             try:
                 db.execute("ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_subject_key")
             except Exception:
@@ -775,11 +769,18 @@ def save_day(db, day: date, done_ids: list, oid: str, ts: str):
     tasks = get_tasks(day.weekday(), oid)
     base = sum(t["points"] for t in tasks if t["id"] in set(done_ids))
     thresholds = get_thresholds(oid); thr = thresholds.get(day.weekday(), {"basic": 0, "full": 0})
-    db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (day.isoformat(), oid))
-    db.execute(
-        "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
-        (day.isoformat(), oid, json.dumps(sorted(done_ids)), base, base, ts, thr["basic"], thr["full"])
-    )
+    
+    existing = db.execute("SELECT day FROM daily_records WHERE day=? AND owner_id=?", (day.isoformat(), oid)).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE daily_records SET done_tasks=?, base_score=?, bonus_score=0, bonus_detail='{}', total_score=?, updated_at=?, basic_thr=?, full_thr=? WHERE day=? AND owner_id=?",
+            (json.dumps(sorted(done_ids)), base, base, ts, thr["basic"], thr["full"], day.isoformat(), oid)
+        )
+    else:
+        db.execute(
+            "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
+            (day.isoformat(), oid, json.dumps(sorted(done_ids)), base, base, ts, thr["basic"], thr["full"])
+        )
     db.commit()
     recalc_all_bonus(db, oid)
     settle_longterm_bonus(db, oid, ts)
@@ -1425,11 +1426,19 @@ def main():
                                 else:
                                     try:
                                         t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
-                                        db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
-                                        db.execute(
-                                            "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
-                                            (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
-                                        )
+                                        
+                                        # 先查是否已有记录，改为 UPDATE 或 INSERT，防止失败时数据丢失
+                                        existing_row = db.execute("SELECT day FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as)).fetchone()
+                                        if existing_row:
+                                            db.execute(
+                                                "UPDATE daily_records SET done_tasks=?, base_score=?, bonus_score=0, bonus_detail='{}', total_score=?, updated_at=?, basic_thr=?, full_thr=? WHERE day=? AND owner_id=?",
+                                                (json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"], sel_date.isoformat(), view_as)
+                                            )
+                                        else:
+                                            db.execute(
+                                                "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
+                                                (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
+                                            )
                                         db.commit()
                                         
                                         # 记录写入成功后，再扣除补签卡
