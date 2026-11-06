@@ -231,7 +231,6 @@ def init_db(db):
     # ============ 【暴力修复】彻底清理 PostgreSQL 所有历史遗留主键与约束 ============
     if db.is_cloud:
         try:
-            # 强制拆除 daily_records
             db.execute("ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_pkey CASCADE")
             db.execute("ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_day_key CASCADE")
             db.execute("ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_day_owner_id_key CASCADE")
@@ -239,7 +238,6 @@ def init_db(db):
             db.execute("DROP INDEX IF EXISTS daily_records_day_key CASCADE")
             db.execute("DROP INDEX IF EXISTS daily_records_day_owner_id_key CASCADE")
 
-            # 强制拆除其它配置表
             db.execute("ALTER TABLE config_thresholds DROP CONSTRAINT IF EXISTS config_thresholds_pkey CASCADE")
             db.execute("DROP INDEX IF EXISTS config_thresholds_pkey CASCADE")
 
@@ -261,12 +259,10 @@ def init_db(db):
             db.execute("ALTER TABLE extra_points DROP CONSTRAINT IF EXISTS extra_points_pkey CASCADE")
             db.execute("ALTER TABLE redemptions DROP CONSTRAINT IF EXISTS redemptions_pkey CASCADE")
 
-            # 查杀 daily_records 上的其它隐藏唯一约束
             res = db.execute("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name = 'daily_records' AND constraint_type = 'UNIQUE'").fetchall()
             for row in res:
                 db.execute(f"ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS {row['constraint_name']} CASCADE")
 
-            # 修复 config_bonus_rules 遗留的 id 列 null 报错
             try:
                 db.execute("CREATE SEQUENCE IF NOT EXISTS config_bonus_rules_id_seq")
                 db.execute("ALTER TABLE config_bonus_rules ALTER COLUMN id SET DEFAULT nextval('config_bonus_rules_id_seq')")
@@ -1139,34 +1135,59 @@ def main():
 
         bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
 
-        try:
-            visible_users = get_visible_users(current_user, current_role)
-        except Exception:
-            visible_users = [current_user] if current_role == "user" else []
+        view_as = current_user
 
         if current_role == "user":
             view_as = current_user
-        elif current_role == "admin":
-            if current_user not in visible_users:
-                visible_users = [current_user] + visible_users
-            idx = visible_users.index(current_user) if current_user in visible_users else 0
-            view_as = st.selectbox("管理员特权：切换账号", visible_users, index=idx)
         elif current_role == "host":
+            try:
+                visible_users = get_visible_users(current_user, current_role)
+            except Exception:
+                visible_users = []
             if visible_users:
                 view_as = st.selectbox("选择孩子", visible_users, index=0)
             else:
                 view_as = None
-        else:
-            view_as = current_user
+        elif current_role == "admin":
+            all_usernames = [u["username"] for u in all_users_data]
+            if current_user not in all_usernames:
+                all_usernames = [current_user] + all_usernames
+            
+            default_idx = all_usernames.index(current_user) if current_user in all_usernames else 0
+            admin_view_as = st.selectbox("管理员特权：切换账号", all_usernames, index=default_idx)
+            
+            try:
+                target_u_row = db.execute("SELECT role FROM users WHERE username=?", (admin_view_as,)).fetchone()
+                target_role = target_u_row["role"] if target_u_row else "user"
+            except Exception:
+                target_role = "user"
+                
+            if target_role == "host":
+                try:
+                    host_bound_users = db.execute("SELECT username FROM users WHERE host_id=?", (admin_view_as,)).fetchall()
+                    bound_names = [u["username"] for u in host_bound_users]
+                except Exception:
+                    bound_names = []
+                
+                if bound_names:
+                    selected_child = st.selectbox("穿透管理：该 Host 名下的孩子", ["(仅查看 Host 设置)"] + bound_names, index=0)
+                    if selected_child != "(仅查看 Host 设置)":
+                        view_as = selected_child
+                    else:
+                        view_as = admin_view_as
+                else:
+                    view_as = admin_view_as
+            else:
+                view_as = admin_view_as
 
-        if current_role == "host":
-            if view_as not in visible_users and visible_users:
-                view_as = visible_users[0]
-            elif not visible_users:
-                view_as = None
+        if view_as:
+            try:
+                view_user_row = db.execute("SELECT role FROM users WHERE username=?", (view_as,)).fetchone()
+                view_role = view_user_row["role"] if view_user_row else "user"
+            except Exception:
+                view_role = "user"
         else:
-            if view_as not in visible_users:
-                view_as = current_user
+            view_role = "user"
 
         if view_as:
             try:
@@ -1177,7 +1198,7 @@ def main():
                 target_tz = 8.0
             view_today = get_user_today(target_tz)
             view_makeup_sidebar = get_makeup_cards_of(view_as)
-            role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(current_role, current_role)
+            role_display = {"admin": "管理员", "host": "Host", "user": "普通用户"}.get(view_role, view_role)
             st.info(f"当前身份：{html.escape(view_as)} ({role_display})\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
             
             try:
@@ -1185,13 +1206,13 @@ def main():
             except Exception:
                 pass
                 
-            if current_role != "host":
+            if view_role != "host":
                 st.metric("当前可用积分", f"{bal['balance']:.1f}")
         else:
             role_display = "Host"
             st.info(f"当前身份：{html.escape(current_user)} (Host)\n\n暂无绑定的孩子。")
 
-        if not is_mobile_mode and (current_role == "admin" or (current_role == "host" and view_as)):
+        if not is_mobile_mode and (view_role == "admin" or (view_role == "host" and view_as)):
             with st.expander("专注计时器 (番茄钟)", expanded=False):
                 render_timer()
             with st.expander("我的成就徽章"):
@@ -1317,16 +1338,16 @@ def main():
             del st.session_state.role
             st.rerun()
 
-    if current_role == "host" and view_as is None:
+    if view_role == "host" and view_as is None:
         st.info("暂无绑定的孩子，请联系管理员绑定后再使用。")
         st.stop()
 
     base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
     base_mobile = ["打卡", "商城", "兑换"]
 
-    if current_role == "admin":
+    if view_role == "admin":
         tabs = base_desktop + ["系统设置"]
-    elif current_role == "host":
+    elif view_role == "host":
         tabs = ["历史与图表", "系统设置"]
     else:
         tabs = base_desktop
@@ -1455,7 +1476,7 @@ def main():
             st.subheader("历史与图表分析")
             view_makeup_hist = get_makeup_cards_of(view_as)
             
-            if current_role == "host":
+            if view_role == "host":
                 st.info("💡 补签请让孩子在自己的账号里操作。")
             else:
                 if view_makeup_hist > 0:
@@ -1473,30 +1494,22 @@ def main():
                         with st.form("makeup_form"):
                             selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
                             if _submit("使用 1 张补签卡并提交", **_stretch({"type": "primary"})):
-                                # 严格事务：先关闭自动提交
                                 db.begin()
                                 try:
-                                    # 1. 检查卡余额
                                     user_cards = get_makeup_cards_of(view_as)
                                     if user_cards <= 0:
                                         db.end()
                                         st.error("余额不足，无法补签。")
                                     else:
                                         t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
-                                        
-                                        # 2. 暴力覆盖写入记录
                                         db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
                                         db.execute(
                                             "INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
                                             (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"])
                                         )
-                                        
-                                        # 3. 扣除卡券
                                         db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=?", (view_as,))
-                                        
-                                        # 4. 一起提交
                                         db.commit()
-                                        db.end() # 恢复自动提交
+                                        db.end()
                                         
                                         recalc_all_bonus(db, view_as)
                                         settle_longterm_bonus(db, view_as, now.isoformat())
@@ -1504,8 +1517,8 @@ def main():
                                         st.success("补签成功！")
                                         st.rerun()
                                 except Exception as e:
-                                    db.rollback() # 一旦报错，回滚事务
-                                    db.end()      # 恢复自动提交
+                                    db.rollback()
+                                    db.end()
                                     st.error(f"补签失败，请重试：{str(e)}")
                     else:
                         st.info("最近 7 天全勤！")
@@ -1591,7 +1604,6 @@ def main():
                     if st.session_state.get(confirm_key):
                         cc1, cc2 = st.columns(2)
                         if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", **_stretch({"type": "primary"})):
-                            # 严格事务
                             db.begin()
                             try:
                                 curr_bal = get_balance(view_as)
@@ -1715,9 +1727,9 @@ def main():
         with tab_dict["系统设置"]:
             st.subheader("系统设置")
 
-            if current_role == "admin":
+            if view_role == "admin":
                 st.info(f"当前正在配置：**{html.escape(view_as)}**")
-            elif current_role == "host":
+            elif view_role == "host":
                 st.info(f"当前正在配置：**{html.escape(view_as)}**（你绑定的孩子）")
 
             # ---- 1. 修改每日任务 ----
@@ -2041,7 +2053,7 @@ def main():
             # ---- 6. 全局徽章配置 ----
             st.divider()
             st.markdown("### 6. 全局徽章配置与 AI 生成")
-            if current_role == "admin":
+            if view_role == "admin":
                 with st.form("add_badge_form"):
                     c1, c2, c3 = st.columns([3, 2, 2])
                     b_name = c1.text_input("徽章名称", placeholder="如：持之以恒")
@@ -2085,7 +2097,7 @@ def main():
                 st.info("全局徽章由管理员配置。")
 
             # ---- 7. 用户管理与权限控制 ----
-            if current_role == "admin":
+            if view_role == "admin":
                 st.divider()
                 st.markdown("### 7. 用户管理与权限控制")
 
