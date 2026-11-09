@@ -1748,7 +1748,7 @@ def main():
             else:
                 st.info(f"当前正在配置：**{html.escape(view_as)}**（身份：{role_names.get(view_role, view_role)}）")
 
-            # ---- 1. 修改每日任务 (QQ音乐批量操作模式) ----
+            # ---- 1. 修改每日任务 ----
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
 
@@ -1785,7 +1785,6 @@ def main():
                         c2.write(f"**{html.escape(str(t['name']))}**")
                         c3.write(f"{float(t['points'] or 0)} 分")
                 
-                # 底部操作栏（仅在编辑模式显示）
                 if st.session_state[edit_mode_key]:
                     st.divider()
                     if selected_task_ids:
@@ -1793,13 +1792,11 @@ def main():
                         
                         ac1, ac2, ac3 = st.columns(3)
                         
-                        # 单选编辑
                         if len(selected_task_ids) == 1:
                             with ac1:
                                 if st.button("✏️ 编辑选中任务", **_stretch({})):
                                     st.session_state[f"editing_task_id_{view_as}_{sel_wd}"] = selected_task_ids[0]
                         
-                        # 多选批量删除
                         with ac2:
                             if st.button("🗑 删除选中任务", **_stretch({"type": "primary"})):
                                 db.begin()
@@ -1816,12 +1813,10 @@ def main():
                                     db.end()
                                     st.error(f"删除失败：{e}")
                                     
-                        # 批量同步
                         with ac3:
                             if st.button("🔄 同步到其他星期", **_stretch({})):
                                 st.session_state[f"syncing_tasks_{view_as}_{sel_wd}"] = selected_task_ids
                                 
-                        # 编辑表单
                         edit_task_id = st.session_state.get(f"editing_task_id_{view_as}_{sel_wd}")
                         if edit_task_id:
                             t_to_edit = next((x for x in tasks_list if x["id"] == edit_task_id), None)
@@ -1857,7 +1852,6 @@ def main():
                                         st.session_state.pop(f"editing_task_id_{view_as}_{sel_wd}", None)
                                         st.rerun()
 
-                        # 同步表单
                         syncing_ids = st.session_state.get(f"syncing_tasks_{view_as}_{sel_wd}")
                         if syncing_ids:
                             st.info(f"将选中的 {len(syncing_ids)} 个任务同步到以下星期：")
@@ -1880,7 +1874,6 @@ def main():
                                             tasks_to_sync = [x for x in tasks_list if x["id"] in syncing_ids]
                                             for target_wd in target_days:
                                                 for t in tasks_to_sync:
-                                                    # 防重：如果存在同名同分类任务则跳过
                                                     existing = db.execute(
                                                         "SELECT 1 FROM config_tasks WHERE weekday=? AND owner_id=? AND name=? AND category=?",
                                                         (target_wd, view_as, t["name"], t["category"])
@@ -1943,17 +1936,86 @@ def main():
             except Exception:
                 shop_list = []
 
+            edit_shop_key = f"shop_edit_mode_{view_as}"
+            if edit_shop_key not in st.session_state:
+                st.session_state[edit_shop_key] = False
+
+            header_cols = st.columns([3, 1])
+            header_cols[0].markdown(f"**商城奖励（共 {len(shop_list)} 项）**")
+            if header_cols[1].button("完成编辑" if st.session_state[edit_shop_key] else "✏️ 编辑", key=f"toggle_edit_shop_{view_as}"):
+                st.session_state[edit_shop_key] = not st.session_state[edit_shop_key]
+                st.rerun()
+
+            selected_shop_ids = []
             if shop_list:
                 for s in shop_list:
-                    sc1, sc2, sc3 = st.columns([5, 2, 1])
-                    sc1.write(f"**{html.escape(str(s['name']))}**")
-                    sc2.write(f"{float(s['cost'] or 0)} 分")
-                    if sc3.button("🗑 删除", key=f"del_shop_{view_as}_{s['id']}", **_stretch({"type": "primary"})):
-                        try:
-                            db.execute("DELETE FROM config_shop WHERE id=? AND owner_id=?", (s["id"], view_as))
-                            db.commit(); st.cache_data.clear(); st.success("已删除该奖励"); st.rerun()
-                        except RuntimeError as e:
-                            st.error(str(e))
+                    if st.session_state[edit_shop_key]:
+                        c1, c2, c3 = st.columns([1, 5, 2])
+                        if c1.checkbox("", key=f"chk_shop_{view_as}_{s['id']}", label_visibility="collapsed"):
+                            selected_shop_ids.append(s["id"])
+                        c2.write(f"**{html.escape(str(s['name']))}**")
+                        c3.write(f"{float(s['cost'] or 0)} 分")
+                    else:
+                        c1, c2 = st.columns([5, 2])
+                        c1.write(f"**{html.escape(str(s['name']))}**")
+                        c2.write(f"{float(s['cost'] or 0)} 分")
+
+                if st.session_state[edit_shop_key]:
+                    st.divider()
+                    if selected_shop_ids:
+                        st.write(f"已选中 **{len(selected_shop_ids)}** 项")
+                        ac1, ac2 = st.columns(2)
+                        if len(selected_shop_ids) == 1:
+                            with ac1:
+                                if st.button("✏️ 编辑选中奖励", key=f"edit_shop_btn_{view_as}"):
+                                    st.session_state[f"editing_shop_id_{view_as}"] = selected_shop_ids[0]
+                        with ac2:
+                            if st.button("🗑 删除选中奖励", key=f"del_shop_btn_{view_as}", **_stretch({"type": "primary"})):
+                                db.begin()
+                                try:
+                                    placeholders = ",".join(["?"] * len(selected_shop_ids))
+                                    db.execute(f"DELETE FROM config_shop WHERE id IN ({placeholders}) AND owner_id=?", (*selected_shop_ids, view_as))
+                                    db.commit()
+                                    db.end()
+                                    st.cache_data.clear()
+                                    st.success("批量删除成功！")
+                                    st.rerun()
+                                except Exception as e:
+                                    db.rollback()
+                                    db.end()
+                                    st.error(f"删除失败：{e}")
+
+                        edit_shop_id = st.session_state.get(f"editing_shop_id_{view_as}")
+                        if edit_shop_id:
+                            s_to_edit = next((x for x in shop_list if x["id"] == edit_shop_id), None)
+                            if s_to_edit:
+                                st.info(f"正在编辑奖励：{s_to_edit['name']}")
+                                with st.form(f"edit_shop_form_{view_as}_{edit_shop_id}"):
+                                    ec1, ec2 = st.columns(2)
+                                    e_name = ec1.text_input("奖励名称", value=s_to_edit["name"], key=f"es_name_{edit_shop_id}")
+                                    e_cost = ec2.text_input("所需积分", value=str(s_to_edit["cost"]), key=f"es_cost_{edit_shop_id}")
+                                    col_save, col_cancel = st.columns(2)
+                                    if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
+                                        if not e_name.strip():
+                                            st.error("名称不能为空")
+                                        else:
+                                            try:
+                                                c_val = float(e_cost.strip() or "0")
+                                                db.execute("UPDATE config_shop SET name=?, cost=? WHERE id=? AND owner_id=?", (e_name.strip(), c_val, edit_shop_id, view_as))
+                                                db.commit()
+                                                st.cache_data.clear()
+                                                st.session_state.pop(f"editing_shop_id_{view_as}", None)
+                                                st.success("奖励已更新！")
+                                                st.rerun()
+                                            except ValueError:
+                                                st.error("积分必须为数字")
+                                            except RuntimeError as ex:
+                                                st.error(str(ex))
+                                    if col_cancel.form_submit_button("取消编辑", use_container_width=True):
+                                        st.session_state.pop(f"editing_shop_id_{view_as}", None)
+                                        st.rerun()
+                    else:
+                        st.caption("请勾选奖励以进行编辑或删除操作。")
             else:
                 st.caption("暂无商城奖励。")
 
@@ -1989,21 +2051,111 @@ def main():
             except Exception:
                 exam_config = {}
 
+            edit_exam_key = f"exam_edit_mode_{view_as}"
+            if edit_exam_key not in st.session_state:
+                st.session_state[edit_exam_key] = False
+
+            header_cols = st.columns([3, 1])
+            header_cols[0].markdown(f"**考试科目（共 {len(exam_config)} 项）**")
+            if header_cols[1].button("完成编辑" if st.session_state[edit_exam_key] else "✏️ 编辑", key=f"toggle_edit_exam_{view_as}"):
+                st.session_state[edit_exam_key] = not st.session_state[edit_exam_key]
+                st.rerun()
+
+            selected_exam_subs = []
             if exam_config:
                 for sub, cfg in exam_config.items():
-                    ec1, ec2, ec3, ec4 = st.columns([2, 4, 2, 1])
-                    ec1.write(f"**{html.escape(str(sub))}**")
-                    if cfg.get("type") == "score":
-                        ec2.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                    if st.session_state[edit_exam_key]:
+                        c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
+                        if c1.checkbox("", key=f"chk_exam_{view_as}_{sub}", label_visibility="collapsed"):
+                            selected_exam_subs.append(sub)
+                        c2.write(f"**{html.escape(str(sub))}**")
+                        if cfg.get("type") == "score":
+                            c3.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                        else:
+                            c3.write(f"等级制 | 目标 {cfg.get('target')}")
+                        c4.write(f"单档 {cfg.get('step_points', 0)} 分")
                     else:
-                        ec2.write(f"等级制 | 目标 {cfg.get('target')}")
-                    ec3.write(f"单档 {cfg.get('step_points', 0)} 分")
-                    if ec4.button("🗑 删除", key=f"del_exam_{view_as}_{sub}", **_stretch({"type": "primary"})):
-                        try:
-                            db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (sub, view_as))
-                            db.commit(); st.cache_data.clear(); st.success("已删除该科目"); st.rerun()
-                        except RuntimeError as e:
-                            st.error(str(e))
+                        c1, c2, c3 = st.columns([2, 5, 2])
+                        c1.write(f"**{html.escape(str(sub))}**")
+                        if cfg.get("type") == "score":
+                            c2.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                        else:
+                            c2.write(f"等级制 | 目标 {cfg.get('target')}")
+                        c3.write(f"单档 {cfg.get('step_points', 0)} 分")
+
+                if st.session_state[edit_exam_key]:
+                    st.divider()
+                    if selected_exam_subs:
+                        st.write(f"已选中 **{len(selected_exam_subs)}** 项")
+                        ac1, ac2 = st.columns(2)
+                        if len(selected_exam_subs) == 1:
+                            with ac1:
+                                if st.button("✏️ 编辑选中科目", key=f"edit_exam_btn_{view_as}"):
+                                    st.session_state[f"editing_exam_sub_{view_as}"] = selected_exam_subs[0]
+                        with ac2:
+                            if st.button("🗑 删除选中科目", key=f"del_exam_btn_{view_as}", **_stretch({"type": "primary"})):
+                                db.begin()
+                                try:
+                                    placeholders = ",".join(["?"] * len(selected_exam_subs))
+                                    db.execute(f"DELETE FROM config_exam WHERE subject IN ({placeholders}) AND owner_id=?", (*selected_exam_subs, view_as))
+                                    db.commit()
+                                    db.end()
+                                    st.cache_data.clear()
+                                    st.success("批量删除成功！")
+                                    st.rerun()
+                                except Exception as e:
+                                    db.rollback()
+                                    db.end()
+                                    st.error(f"删除失败：{e}")
+
+                        edit_sub = st.session_state.get(f"editing_exam_sub_{view_as}")
+                        if edit_sub and edit_sub in exam_config:
+                            cfg = exam_config[edit_sub]
+                            st.info(f"正在编辑科目：{edit_sub}")
+                            with st.form(f"edit_exam_form_{view_as}_{edit_sub}"):
+                                ec1, ec2, ec3 = st.columns(3)
+                                e_sub = ec1.text_input("科目名称", value=edit_sub, key=f"e_sub_{edit_sub}")
+                                e_type = ec2.selectbox("类型", ["score", "grade"], index=0 if cfg.get("type")=="score" else 1, format_func=lambda x: "分数制" if x=="score" else "等级制")
+                                e_target = ec3.text_input("目标 (分数或等级)", value=str(cfg.get("target", "")), key=f"e_tgt_{edit_sub}")
+                                
+                                ec4, ec5, ec6 = st.columns(3)
+                                e_max = ec4.text_input("满分 (仅分数制)", value=str(cfg.get("max_score", "150")), key=f"e_max_{edit_sub}")
+                                e_step = ec5.text_input("分差 (仅分数制)", value=str(cfg.get("step", "0")), key=f"e_step_{edit_sub}")
+                                e_pts = ec6.text_input("单档奖励", value=str(cfg.get("step_points", "0")), key=f"e_pts_{edit_sub}")
+                                
+                                col_save, col_cancel = st.columns(2)
+                                if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
+                                    if not e_sub.strip() or not e_target.strip():
+                                        st.error("科目名称和目标不能为空")
+                                    else:
+                                        try:
+                                            pts_v = float(e_pts.strip() or "0")
+                                            if e_type == "score":
+                                                cfg_new = {"type": "score", "max_score": float(e_max.strip() or "150"), "target": float(e_target.strip()), "step": float(e_step.strip() or "0"), "step_points": pts_v}
+                                            else:
+                                                cfg_new = {"type": "grade", "target": e_target.strip(), "step_points": pts_v}
+                                            
+                                            if e_sub.strip() != edit_sub:
+                                                if db.execute("SELECT 1 FROM config_exam WHERE subject=? AND owner_id=?", (e_sub.strip(), view_as)).fetchone():
+                                                    st.error("新科目名称已存在")
+                                                    st.stop()
+                                            
+                                            db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (edit_sub, view_as))
+                                            db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (e_sub.strip(), view_as, json.dumps(cfg_new)))
+                                            db.commit()
+                                            st.cache_data.clear()
+                                            st.session_state.pop(f"editing_exam_sub_{view_as}", None)
+                                            st.success("科目已更新！")
+                                            st.rerun()
+                                        except ValueError:
+                                            st.error("分数/目标必须为数字")
+                                        except RuntimeError as ex:
+                                            st.error(str(ex))
+                                if col_cancel.form_submit_button("取消编辑", use_container_width=True):
+                                    st.session_state.pop(f"editing_exam_sub_{view_as}", None)
+                                    st.rerun()
+                    else:
+                        st.caption("请勾选科目以进行编辑或删除操作。")
             else:
                 st.caption("暂无考试科目。")
 
@@ -2036,19 +2188,12 @@ def main():
                                 st.error("满分/目标/分差/单档奖励必须为数字")
                             else:
                                 try:
-                                    existing_row = db.execute(
-                                        "SELECT * FROM config_exam WHERE subject=? AND owner_id=?",
-                                        (new_exam_sub.strip(), view_as)
-                                    ).fetchone()
+                                    existing_row = db.execute("SELECT * FROM config_exam WHERE subject=? AND owner_id=?", (new_exam_sub.strip(), view_as)).fetchone()
                                     if existing_row:
                                         st.warning("该科目已存在，请先删除旧配置。")
                                     else:
-                                        cfg = {"type": "score", "max_score": max_val, "target": target_val,
-                                               "step": step_val, "step_points": step_pts_val}
-                                        db.execute(
-                                            "INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)",
-                                            (new_exam_sub.strip(), view_as, json.dumps(cfg))
-                                        )
+                                        cfg = {"type": "score", "max_score": max_val, "target": target_val, "step": step_val, "step_points": step_pts_val}
+                                        db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_exam_sub.strip(), view_as, json.dumps(cfg)))
                                         db.commit(); st.cache_data.clear(); st.success("科目已添加！"); st.rerun()
                                 except RuntimeError as e:
                                     st.error(str(e))
@@ -2068,18 +2213,12 @@ def main():
                                 st.error("单档奖励必须为数字")
                             else:
                                 try:
-                                    existing_row = db.execute(
-                                        "SELECT * FROM config_exam WHERE subject=? AND owner_id=?",
-                                        (new_exam_sub.strip(), view_as)
-                                    ).fetchone()
+                                    existing_row = db.execute("SELECT * FROM config_exam WHERE subject=? AND owner_id=?", (new_exam_sub.strip(), view_as)).fetchone()
                                     if existing_row:
                                         st.warning("该科目已存在，请先删除旧配置。")
                                     else:
                                         cfg = {"type": "grade", "target": new_exam_target, "step_points": step_pts_val}
-                                        db.execute(
-                                            "INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)",
-                                            (new_exam_sub.strip(), view_as, json.dumps(cfg))
-                                        )
+                                        db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_exam_sub.strip(), view_as, json.dumps(cfg)))
                                         db.commit(); st.cache_data.clear(); st.success("科目已添加！"); st.rerun()
                                 except RuntimeError as e:
                                     st.error(str(e))
@@ -2092,17 +2231,89 @@ def main():
             except Exception:
                 mh_list = []
 
+            edit_mh_key = f"mh_edit_mode_{view_as}"
+            if edit_mh_key not in st.session_state:
+                st.session_state[edit_mh_key] = False
+
+            header_cols = st.columns([3, 1])
+            header_cols[0].markdown(f"**多科奖励（共 {len(mh_list)} 项）**")
+            if header_cols[1].button("完成编辑" if st.session_state[edit_mh_key] else "✏️ 编辑", key=f"toggle_edit_mh_{view_as}"):
+                st.session_state[edit_mh_key] = not st.session_state[edit_mh_key]
+                st.rerun()
+
+            selected_mh_counts = []
             if mh_list:
                 for mh in mh_list:
-                    mc1, mc2, mc3 = st.columns([4, 3, 1])
-                    mc1.write(f"达成 **{mh['hit_count']}** 门及以上")
-                    mc2.write(f"+{mh['points']} 分")
-                    if mc3.button("🗑 删除", key=f"del_mh_{view_as}_{mh['hit_count']}", **_stretch({"type": "primary"})):
-                        try:
-                            db.execute("DELETE FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (mh["hit_count"], view_as))
-                            db.commit(); st.cache_data.clear(); st.success("已删除该档位"); st.rerun()
-                        except RuntimeError as e:
-                            st.error(str(e))
+                    if st.session_state[edit_mh_key]:
+                        c1, c2, c3 = st.columns([1, 4, 3])
+                        if c1.checkbox("", key=f"chk_mh_{view_as}_{mh['hit_count']}", label_visibility="collapsed"):
+                            selected_mh_counts.append(mh["hit_count"])
+                        c2.write(f"达成 **{mh['hit_count']}** 门及以上")
+                        c3.write(f"+{mh['points']} 分")
+                    else:
+                        c1, c2 = st.columns([4, 3])
+                        c1.write(f"达成 **{mh['hit_count']}** 门及以上")
+                        c2.write(f"+{mh['points']} 分")
+
+                if st.session_state[edit_mh_key]:
+                    st.divider()
+                    if selected_mh_counts:
+                        st.write(f"已选中 **{len(selected_mh_counts)}** 项")
+                        ac1, ac2 = st.columns(2)
+                        if len(selected_mh_counts) == 1:
+                            with ac1:
+                                if st.button("✏️ 编辑选中档位", key=f"edit_mh_btn_{view_as}"):
+                                    st.session_state[f"editing_mh_count_{view_as}"] = selected_mh_counts[0]
+                        with ac2:
+                            if st.button("🗑 删除选中档位", key=f"del_mh_btn_{view_as}", **_stretch({"type": "primary"})):
+                                db.begin()
+                                try:
+                                    placeholders = ",".join(["?"] * len(selected_mh_counts))
+                                    db.execute(f"DELETE FROM config_exam_multihit WHERE hit_count IN ({placeholders}) AND owner_id=?", (*selected_mh_counts, view_as))
+                                    db.commit()
+                                    db.end()
+                                    st.cache_data.clear()
+                                    st.success("批量删除成功！")
+                                    st.rerun()
+                                except Exception as e:
+                                    db.rollback()
+                                    db.end()
+                                    st.error(f"删除失败：{e}")
+
+                        edit_mh_count = st.session_state.get(f"editing_mh_count_{view_as}")
+                        if edit_mh_count:
+                            mh_to_edit = next((x for x in mh_list if x["hit_count"] == edit_mh_count), None)
+                            if mh_to_edit:
+                                st.info(f"正在编辑：达成 {edit_mh_count} 门奖励")
+                                with st.form(f"edit_mh_form_{view_as}_{edit_mh_count}"):
+                                    ec1, ec2 = st.columns(2)
+                                    e_count = ec1.text_input("达成科目数", value=str(mh_to_edit["hit_count"]), key=f"emc_{edit_mh_count}")
+                                    e_pts = ec2.text_input("奖励分数", value=str(mh_to_edit["points"]), key=f"emp_{edit_mh_count}")
+                                    col_save, col_cancel = st.columns(2)
+                                    if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
+                                        try:
+                                            c_val = int(e_count.strip())
+                                            p_val = float(e_pts.strip())
+                                            if c_val < 1: st.error("科目数必须≥1")
+                                            elif c_val != edit_mh_count and db.execute("SELECT 1 FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (c_val, view_as)).fetchone():
+                                                st.error("该达成科目数已存在")
+                                            else:
+                                                db.execute("DELETE FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (edit_mh_count, view_as))
+                                                db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (c_val, view_as, p_val))
+                                                db.commit()
+                                                st.cache_data.clear()
+                                                st.session_state.pop(f"editing_mh_count_{view_as}", None)
+                                                st.success("档位已更新！")
+                                                st.rerun()
+                                        except ValueError:
+                                            st.error("科目数和奖励分数必须为数字")
+                                        except RuntimeError as ex:
+                                            st.error(str(ex))
+                                    if col_cancel.form_submit_button("取消编辑", use_container_width=True):
+                                        st.session_state.pop(f"editing_mh_count_{view_as}", None)
+                                        st.rerun()
+                    else:
+                        st.caption("请勾选档位以进行编辑或删除操作。")
             else:
                 st.caption("暂无多科达成奖励配置。")
 
@@ -2122,17 +2333,11 @@ def main():
                             st.error("达成科目数必须 ≥ 1")
                         else:
                             try:
-                                existing = db.execute(
-                                    "SELECT * FROM config_exam_multihit WHERE hit_count=? AND owner_id=?",
-                                    (count_val, view_as)
-                                ).fetchone()
+                                existing = db.execute("SELECT * FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (count_val, view_as)).fetchone()
                                 if existing:
                                     st.warning("该达成科目数已存在，请先删除旧配置。")
                                 else:
-                                    db.execute(
-                                        "INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)",
-                                        (count_val, view_as, float(pts_val))
-                                    )
+                                    db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (count_val, view_as, float(pts_val)))
                                     db.commit(); st.cache_data.clear(); st.success("档位已添加！"); st.rerun()
                             except RuntimeError as e:
                                 st.error(str(e))
@@ -2231,20 +2436,58 @@ def main():
                 except Exception:
                     existing_badges = []
 
+                edit_badge_key = "badge_edit_mode"
+                if edit_badge_key not in st.session_state:
+                    st.session_state[edit_badge_key] = False
+
+                header_cols = st.columns([3, 1])
+                header_cols[0].markdown(f"**已配置徽章（共 {len(existing_badges)} 项）**")
+                if header_cols[1].button("完成编辑" if st.session_state[edit_badge_key] else "✏️ 编辑", key="toggle_edit_badge"):
+                    st.session_state[edit_badge_key] = not st.session_state[edit_badge_key]
+                    st.rerun()
+
+                selected_badge_ids = []
                 if existing_badges:
                     for b in existing_badges:
-                        c1, c2, c3, c4 = st.columns([2, 3, 3, 2])
-                        with c1:
-                            st.markdown(f'<img src="{html.escape(b["icon_url"] or "", quote=True)}" width="50" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'">', unsafe_allow_html=True)
-                        c2.write(f"**{html.escape(b['name'])}**")
-                        type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
-                        c3.write(f"条件：{type_cn} ≥ {b['cond_val']}")
-                        if c4.button("删除", key=f"del_badge_{b['id']}", **_stretch({"type": "primary"})):
-                            try:
-                                db.execute("DELETE FROM config_badges WHERE id=?", (b["id"],))
-                                db.commit(); st.cache_data.clear(); st.rerun()
-                            except RuntimeError as e:
-                                st.error(str(e))
+                        if st.session_state[edit_badge_key]:
+                            c1, c2, c3, c4 = st.columns([1, 2, 5, 2])
+                            if c1.checkbox("", key=f"chk_badge_{b['id']}", label_visibility="collapsed"):
+                                selected_badge_ids.append(b["id"])
+                            with c2:
+                                st.markdown(f'<img src="{html.escape(b["icon_url"] or "", quote=True)}" width="40" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'">', unsafe_allow_html=True)
+                            c3.write(f"**{html.escape(b['name'])}**")
+                            type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
+                            c4.write(f"条件：{type_cn} ≥ {b['cond_val']}")
+                        else:
+                            c1, c2, c3 = st.columns([2, 5, 2])
+                            with c1:
+                                st.markdown(f'<img src="{html.escape(b["icon_url"] or "", quote=True)}" width="50" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'">', unsafe_allow_html=True)
+                            c2.write(f"**{html.escape(b['name'])}**")
+                            type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
+                            c3.write(f"条件：{type_cn} ≥ {b['cond_val']}")
+
+                    if st.session_state[edit_badge_key]:
+                        st.divider()
+                        if selected_badge_ids:
+                            st.write(f"已选中 **{len(selected_badge_ids)}** 项")
+                            if st.button("🗑 删除选中徽章", key="del_badge_btn", **_stretch({"type": "primary"})):
+                                db.begin()
+                                try:
+                                    placeholders = ",".join(["?"] * len(selected_badge_ids))
+                                    db.execute(f"DELETE FROM config_badges WHERE id IN ({placeholders})", (*selected_badge_ids,))
+                                    db.commit()
+                                    db.end()
+                                    st.cache_data.clear()
+                                    st.success("批量删除成功！")
+                                    st.rerun()
+                                except Exception as e:
+                                    db.rollback()
+                                    db.end()
+                                    st.error(f"删除失败：{e}")
+                        else:
+                            st.caption("请勾选徽章以进行删除操作。")
+                else:
+                    st.caption("暂无全局徽章。")
             else:
                 st.info("全局徽章由管理员配置。")
 
@@ -2258,6 +2501,17 @@ def main():
                             "config_exam", "config_exam_rules", "config_thresholds",
                             "config_bonus_rules", "config_exam_multihit"]
 
+                edit_user_key = "user_edit_mode"
+                if edit_user_key not in st.session_state:
+                    st.session_state[edit_user_key] = False
+
+                header_cols = st.columns([3, 1])
+                header_cols[0].markdown(f"**系统用户（共 {len(all_users_data)} 人）**")
+                if header_cols[1].button("完成编辑" if st.session_state[edit_user_key] else "✏️ 编辑", key="toggle_edit_user"):
+                    st.session_state[edit_user_key] = not st.session_state[edit_user_key]
+                    st.rerun()
+
+                selected_usernames = []
                 for u in all_users_data:
                     uname = u["username"]; urole = u["role"]
                     try:
@@ -2269,156 +2523,176 @@ def main():
                     is_self = (uname == current_user)
                     role_badge = {"admin": "🟢 管理员", "host": "🟡 Host", "user": "⚪ 普通用户"}.get(urole, urole)
 
-                    i1, i2, i3 = st.columns([3, 2, 3])
-                    i1.write(f"👤 **{html.escape(uname)}**" + (" (你自己)" if is_self else ""))
-                    i2.write(role_badge)
-                    i3.write(f"↳ Host: **{html.escape(uhost)}**" if uhost else "↳ Host: —")
+                    if st.session_state[edit_user_key]:
+                        if is_self:
+                            c1, c2, c3, c4 = st.columns([1, 3, 2, 3])
+                            c1.write("")
+                            c2.write(f"👤 **{html.escape(uname)}** (你自己)")
+                            c3.write(role_badge)
+                            c4.write(f"↳ Host: **{html.escape(uhost)}**" if uhost else "↳ Host: —")
+                        else:
+                            c1, c2, c3, c4 = st.columns([1, 3, 2, 3])
+                            if c1.checkbox("", key=f"chk_user_{uname}", label_visibility="collapsed"):
+                                selected_usernames.append(uname)
+                            c2.write(f"👤 **{html.escape(uname)}**")
+                            c3.write(role_badge)
+                            c4.write(f"↳ Host: **{html.escape(uhost)}**" if uhost else "↳ Host: —")
+                    else:
+                        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
+                        c1.write(f"👤 **{html.escape(uname)}**" + (" (你自己)" if is_self else ""))
+                        c2.write(role_badge)
+                        c3.write(f"↳ Host: **{html.escape(uhost)}**" if uhost else "↳ Host: —")
+                        if not is_self:
+                            with c4:
+                                with st.expander("操作"):
+                                    if st.button("→ 管理员", key=f"set_admin_{uname}", **_stretch({})):
+                                        try:
+                                            db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
+                                            db.commit(); st.cache_data.clear(); st.rerun()
+                                        except RuntimeError as e: st.error(str(e))
+                                    if st.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host"), **_stretch({})):
+                                        try:
+                                            blocked = False
+                                            if urole == "admin":
+                                                if _remaining_admins(db, uname) == 0:
+                                                    st.error("这是系统里最后一个管理员，不能降级为 Host。请先提升另一个用户为管理员。")
+                                                    blocked = True
+                                            if not blocked:
+                                                if urole == "host":
+                                                    bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                                                    if bound_count > 0:
+                                                        st.session_state[f"confirm_demote_{uname}"] = 'host'
+                                                        st.rerun()
+                                                if urole != "host":
+                                                    db.execute("UPDATE users SET role='host' WHERE username=?", (uname,))
+                                                    db.commit(); st.cache_data.clear(); st.rerun()
+                                        except RuntimeError as e: st.error(str(e))
+                                    if st.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user"), **_stretch({})):
+                                        try:
+                                            blocked = False
+                                            if urole == "admin":
+                                                if _remaining_admins(db, uname) == 0:
+                                                    st.error("这是系统里最后一个管理员，不能降级为普通用户。请先提升另一个用户为管理员。")
+                                                    blocked = True
+                                            if not blocked:
+                                                if urole == "host":
+                                                    bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                                                    if bound_count > 0:
+                                                        st.session_state[f"confirm_demote_{uname}"] = 'user'
+                                                        st.rerun()
+                                                if urole != "host":
+                                                    db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
+                                                    db.commit(); st.cache_data.clear(); st.rerun()
+                                        except RuntimeError as e: st.error(str(e))
 
-                    if not is_self:
-                        rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+                                    if st.button("重置密码", key=f"reset_{uname}", **_stretch({})):
+                                        try:
+                                            db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname))
+                                            db.commit(); st.success(f"密码已重置")
+                                        except RuntimeError as e: st.error(str(e))
 
-                        if rc1.button("→ 管理员", key=f"set_admin_{uname}", disabled=(urole == "admin"), **_stretch({})):
-                            try:
-                                db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,))
-                                db.commit(); st.cache_data.clear(); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
-
-                        if rc2.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host"), **_stretch({})):
-                            try:
-                                blocked = False
-                                if urole == "admin":
-                                    if _remaining_admins(db, uname) == 0:
-                                        st.error("这是系统里最后一个管理员，不能降级为 Host。请先提升另一个用户为管理员。")
-                                        blocked = True
-                                if not blocked:
-                                    if urole == "host":
-                                        bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
-                                        if bound_count > 0:
-                                            st.session_state[f"confirm_demote_{uname}"] = 'host'
-                                            st.rerun()
-                                    if urole != "host":
-                                        db.execute("UPDATE users SET role='host' WHERE username=?", (uname,))
-                                        db.commit(); st.cache_data.clear(); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
-
-                        if rc3.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user"), **_stretch({})):
-                            try:
-                                blocked = False
-                                if urole == "admin":
-                                    if _remaining_admins(db, uname) == 0:
-                                        st.error("这是系统里最后一个管理员，不能降级为普通用户。请先提升另一个用户为管理员。")
-                                        blocked = True
-                                if not blocked:
-                                    if urole == "host":
-                                        bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
-                                        if bound_count > 0:
-                                            st.session_state[f"confirm_demote_{uname}"] = 'user'
-                                            st.rerun()
-                                    if urole != "host":
-                                        db.execute("UPDATE users SET role='user' WHERE username=?", (uname,))
-                                        db.commit(); st.cache_data.clear(); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
-
-                        if rc4.button("重置密码", key=f"reset_{uname}", **_stretch({})):
-                            try:
-                                db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname))
-                                db.commit(); st.success(f"用户 {uname} 的密码已重置为 123456")
-                            except RuntimeError as e: st.error(str(e))
-
-                        if rc5.button("删除", key=f"del_{uname}", **_stretch({})):
-                            st.session_state[f"pending_del_{uname}"] = True
-                            st.rerun()
-
-                        bc1, bc2, bc3 = st.columns([3, 1, 1])
-                        bind_val = bc1.text_input("绑定到 host", value=uhost or "", key=f"bind_val_{uname}", label_visibility="collapsed", placeholder="输入 host 用户名")
-                        if bc2.button("保存绑定", key=f"save_bind_{uname}", **_stretch({})):
-                            target = (bind_val or "").strip()
-                            if not target:
-                                st.error("Host 用户名不能为空")
-                            elif target == uname:
-                                st.error("不能绑定到自己")
-                            else:
-                                try:
-                                    t_row = db.execute("SELECT role FROM users WHERE username=?", (target,)).fetchone()
-                                    if not t_row:
-                                        st.error(f"目标 {target} 不存在")
-                                    elif t_row["role"] not in ("host", "admin"):
-                                        st.error(f"目标 {target} 不是 host/admin")
-                                    else:
-                                        visited = {uname}; cur = target; cyclic = False
-                                        while cur:
-                                            if cur in visited:
-                                                cyclic = True; break
-                                            visited.add(cur)
-                                            c_row = db.execute("SELECT host_id FROM users WHERE username=?", (cur,)).fetchone()
-                                            cur = dict(c_row).get("host_id") if c_row else None
-                                        if cyclic:
-                                            st.error("检测到循环绑定，操作被拒绝")
+                                    bind_val = st.text_input("绑定到 host", value=uhost or "", key=f"bind_val_{uname}", label_visibility="collapsed", placeholder="输入 host 用户名")
+                                    if st.button("保存绑定", key=f"save_bind_{uname}", **_stretch({})):
+                                        target = (bind_val or "").strip()
+                                        if not target: st.error("Host 用户名不能为空")
+                                        elif target == uname: st.error("不能绑定到自己")
                                         else:
-                                            db.execute("UPDATE users SET host_id=? WHERE username=?", (target, uname))
-                                            db.commit(); st.cache_data.clear(); st.success(f"{uname} 已绑定到 {target}"); st.rerun()
-                                except RuntimeError as e: st.error(str(e))
-                        if bc3.button("解绑", key=f"unbind_{uname}", disabled=(not uhost), **_stretch({})):
-                            try:
-                                db.execute("UPDATE users SET host_id=NULL WHERE username=?", (uname,))
-                                db.commit(); st.cache_data.clear(); st.success(f"{uname} 已解绑"); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
+                                            try:
+                                                t_row = db.execute("SELECT role FROM users WHERE username=?", (target,)).fetchone()
+                                                if not t_row: st.error(f"目标不存在")
+                                                elif t_row["role"] not in ("host", "admin"): st.error(f"目标不是 host/admin")
+                                                else:
+                                                    visited = {uname}; cur = target; cyclic = False
+                                                    while cur:
+                                                        if cur in visited: cyclic = True; break
+                                                        visited.add(cur)
+                                                        c_row = db.execute("SELECT host_id FROM users WHERE username=?", (cur,)).fetchone()
+                                                        cur = dict(c_row).get("host_id") if c_row else None
+                                                    if cyclic: st.error("检测到循环绑定")
+                                                    else:
+                                                        db.execute("UPDATE users SET host_id=? WHERE username=?", (target, uname))
+                                                        db.commit(); st.cache_data.clear(); st.success(f"已绑定"); st.rerun()
+                                            except RuntimeError as e: st.error(str(e))
+                                    if st.button("解绑", key=f"unbind_{uname}", disabled=(not uhost), **_stretch({})):
+                                        try:
+                                            db.execute("UPDATE users SET host_id=NULL WHERE username=?", (uname,))
+                                            db.commit(); st.cache_data.clear(); st.success("已解绑"); st.rerun()
+                                        except RuntimeError as e: st.error(str(e))
+                    st.divider()
 
-                        pending_key = f"pending_del_{uname}"
-                        if st.session_state.get(pending_key):
-                            st.warning(f"确认删除用户 **{html.escape(uname)}**？此操作不可撤销。")
-                            try:
-                                bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
-                            except Exception:
-                                bound_count = 0
-                            if bound_count > 0:
-                                st.warning(f"该用户名下有 {bound_count} 个 user，删除后将解绑（user 数据保留）。")
-
-                            cc1, cc2 = st.columns(2)
-                            if cc1.button(f"确认删除 {uname}", key=f"confirm_del_{uname}", **_stretch({"type": "primary"})):
+                if st.session_state[edit_user_key]:
+                    if selected_usernames:
+                        st.write(f"已选中 **{len(selected_usernames)}** 名用户")
+                        ac1, ac2 = st.columns(2)
+                        with ac1:
+                            if st.button("🔑 批量重置密码为123456", key="batch_reset_pwd", **_stretch({})):
                                 try:
-                                    blocked = False
-                                    if urole == "admin":
-                                        if _remaining_admins(db, uname) == 0:
-                                            st.error("这是系统里最后一个管理员，不能删除。请先提升另一个用户为管理员。")
-                                            blocked = True
-                                    if not blocked:
+                                    for u in selected_usernames:
+                                        db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), u))
+                                    db.commit()
+                                    st.success("批量重置成功！")
+                                except Exception as e:
+                                    st.error(str(e))
+                        with ac2:
+                            if st.button("🗑 彻底删除选中用户", key="batch_del_users", **_stretch({"type": "primary"})):
+                                st.session_state["confirm_batch_del_users"] = True
+                                
+                        if st.session_state.get("confirm_batch_del_users"):
+                            st.warning("⚠️ 危险操作：即将彻底删除选中的用户及其全部数据（打卡、积分、配置等），此操作不可逆！")
+                            c1, c2 = st.columns(2)
+                            if c1.button("确认删除", key="confirm_del_btn", type="primary"):
+                                db.begin()
+                                try:
+                                    for uname in selected_usernames:
+                                        # 检查是否是最后一个管理员
+                                        urole_row = db.execute("SELECT role FROM users WHERE username=?", (uname,)).fetchone()
+                                        if urole_row and urole_row["role"] == "admin":
+                                            if _remaining_admins(db, uname) == 0:
+                                                st.error(f"用户 {uname} 是最后一个管理员，无法删除。操作已中止。")
+                                                raise RuntimeError("无法删除最后一个管理员")
+                                        
                                         db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
                                         for tbl in all_tbls:
                                             col = "username" if tbl == "users" else "owner_id"
                                             db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
-                                        db.commit()
-                                        st.session_state.pop(pending_key, None)
-                                        st.cache_data.clear()
-                                        st.success(f"用户 {uname} 已彻底删除")
-                                        st.rerun()
-                                except RuntimeError as e: st.error(str(e))
-                            if cc2.button("取消删除", key=f"cancel_del_{uname}", **_stretch({})):
-                                st.session_state.pop(pending_key, None)
-                                st.rerun()
-
-                        if st.session_state.get(f"confirm_demote_{uname}"):
-                            target_role = st.session_state[f"confirm_demote_{uname}"]
-                            try:
-                                bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
-                            except Exception:
-                                bound_count = 0
-                            st.warning(f"该 host 下有 {bound_count} 个 user，降级/变更后将解绑。是否确认将 {uname} 变更为 {target_role}？")
-                            cc1, cc2 = st.columns(2)
-                            if cc1.button("确认降级", key=f"confirm_demote_btn_{uname}", **_stretch({"type": "primary"})):
-                                try:
-                                    db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
-                                    db.execute("UPDATE users SET role=? WHERE username=?", (target_role, uname))
                                     db.commit()
-                                    del st.session_state[f"confirm_demote_{uname}"]
+                                    db.end()
+                                    st.session_state.pop("confirm_batch_del_users", None)
                                     st.cache_data.clear()
+                                    st.success("用户已彻底删除！")
                                     st.rerun()
-                                except RuntimeError as e: st.error(str(e))
-                            if cc2.button("取消", key=f"cancel_demote_{uname}", **_stretch({})):
-                                del st.session_state[f"confirm_demote_{uname}"]
+                                except Exception as e:
+                                    db.rollback()
+                                    db.end()
+                                    st.error(f"删除失败：{str(e)}")
+                            if c2.button("取消删除", key="cancel_del_btn"):
+                                st.session_state.pop("confirm_batch_del_users", None)
                                 st.rerun()
+                    else:
+                        st.caption("请勾选用户以进行批量重置密码或删除操作。")
 
-                    st.divider()
+                # 处理单独 Host 降级确认
+                for uname in [u["username"] for u in all_users_data]:
+                    if st.session_state.get(f"confirm_demote_{uname}"):
+                        target_role = st.session_state[f"confirm_demote_{uname}"]
+                        try:
+                            bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
+                        except Exception:
+                            bound_count = 0
+                        st.warning(f"该 host 下有 {bound_count} 个 user，降级/变更后将解绑。是否确认将 {uname} 变更为 {target_role}？")
+                        cc1, cc2 = st.columns(2)
+                        if cc1.button("确认降级", key=f"confirm_demote_btn_{uname}", **_stretch({"type": "primary"})):
+                            try:
+                                db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
+                                db.execute("UPDATE users SET role=? WHERE username=?", (target_role, uname))
+                                db.commit()
+                                del st.session_state[f"confirm_demote_{uname}"]
+                                st.cache_data.clear()
+                                st.rerun()
+                            except RuntimeError as e: st.error(str(e))
+                        if cc2.button("取消", key=f"cancel_demote_{uname}", **_stretch({})):
+                            del st.session_state[f"confirm_demote_{uname}"]
+                            st.rerun()
 
 if __name__ == "__main__":
     main()
