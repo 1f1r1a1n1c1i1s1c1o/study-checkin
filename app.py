@@ -7,6 +7,10 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import bcrypt
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import io
+import urllib.request
 
 # 【修复 1】: 本地无 secrets 时兜底
 try:
@@ -113,10 +117,27 @@ def get_remaining_days(exp_str):
         exp_dt = datetime.strptime(exp_str, '%Y-%m-%d %H:%M:%S')
         delta = exp_dt - datetime.now()
         if delta.days < 0: return -1
-        # 向上取整，比如剩 0.5 天也算剩 1 天
         return max(0, delta.days + (1 if delta.seconds > 0 else 0))
     except:
         return -1
+
+def setup_chinese_font():
+    font_path = "SimHei.ttf"
+    if not os.path.exists(font_path):
+        try:
+            url = "https://github.com/StellarCN/scp_zh/raw/master/fonts/SimHei.ttf"
+            urllib.request.urlretrieve(url, font_path)
+        except Exception as e:
+            print(f"字体下载失败: {e}")
+            return None
+    try:
+        fm.fontManager.addfont(font_path)
+        prop = fm.FontProperties(fname=font_path)
+        plt.rcParams['font.sans-serif'] = [prop.get_name()]
+        plt.rcParams['axes.unicode_minus'] = False
+        return prop
+    except Exception:
+        return None
 
 DB_PATH = Path(__file__).resolve().parent / "study_points.db"
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -1098,7 +1119,6 @@ def main():
                 submit = st.form_submit_button("激活", type="primary")
                 if submit and c_code:
                     c_code = c_code.strip().upper()
-                    # 修复并发漏洞：使用事务和条件更新防双花
                     db.begin()
                     try:
                         cur = db.execute("UPDATE redeem_codes SET is_used=1, used_by=? WHERE code=? AND is_used=0", (view_as, c_code))
@@ -1210,6 +1230,8 @@ def main():
         with tab_dict["历史与图表"]:
             st.subheader("历史与图表分析")
             view_makeup_hist = get_makeup_cards_of(view_as)
+            
+            # 先处理补签
             if current_role == "host" and view_role == "user": st.info("💡 补签请让孩子在自己的账号里操作。")
             elif view_role == "host": st.info("💡 该账号为家长，请切换选择其名下的孩子进行操作。")
             else:
@@ -1241,6 +1263,100 @@ def main():
                                     db.rollback(); db.end(); st.error(f"补签失败，请重试：{str(e)}")
                     else: st.info("最近 7 天全勤！")
                 else: st.info('💡 提示：商城有售「补签卡」。')
+
+            # 周报数据聚合与图片生成（普通用户、独立用户，或管理员查看自己时也显示）
+            if view_role in ["user", "solo"] or (current_role == "admin" and view_as == current_user):
+                st.divider()
+                st.markdown("### 📊 专属学习周报")
+                
+                # 获取最近 7 天的记录（含今天）
+                start_date = view_today - timedelta(days=6)
+                try:
+                    week_records = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? AND day >= ? AND day <= ? ORDER BY day ASC", (view_as, start_date.isoformat(), view_today.isoformat())).fetchall()
+                except:
+                    week_records = []
+                
+                # 补齐 7 天数据，防止中间断档导致图表横轴缺失
+                full_week = []
+                for i in range(7):
+                    d_str = (start_date + timedelta(days=i)).isoformat()
+                    rec = next((r for r in week_records if r["day"] == d_str), None)
+                    full_week.append({"day": d_str, "total_score": float(rec["total_score"]) if rec else 0.0})
+                
+                week_records = full_week
+                scores = [r["total_score"] for r in week_records]
+                days_count = len([s for s in scores if s > 0])
+                total_pts = sum(scores)
+                max_daily_score = max(scores) if scores else 0.0
+
+                rc1, rc2, rc3 = st.columns(3)
+                rc1.metric("本周打卡", f"{days_count} 天")
+                rc2.metric("本周总分", f"{total_pts:.1f} 分")
+                rc3.metric("单日最高", f"{max_daily_score:.1f} 分")
+
+                if st.button("📸 生成并下载专属周报图", **_stretch({"type": "primary"})):
+                    with st.spinner("正在生成精美周报..."):
+                        try:
+                            prop = setup_chinese_font()
+                            
+                            # 准备绘图数据
+                            dates_labels = [r["day"][5:] for r in week_records]
+                            
+                            # 创建画布
+                            fig, ax = plt.subplots(figsize=(10, 6), facecolor='#f8f9fa')
+                            ax.set_facecolor('#f8f9fa')
+                            
+                            # 画柱状图
+                            bars = ax.bar(dates_labels, scores, color='#4CAF50', width=0.5, zorder=3)
+                            
+                            # 装饰图表
+                            ax.spines['top'].set_visible(False)
+                            ax.spines['right'].set_visible(False)
+                            ax.spines['left'].set_visible(False)
+                            ax.grid(axis='y', linestyle='--', alpha=0.7, zorder=0)
+                            ax.set_ylabel("每日得分", fontsize=12, fontproperties=prop)
+                            
+                            # 在柱子上标注分数
+                            for bar in bars:
+                                yval = bar.get_height()
+                                if yval > 0:
+                                    ax.text(bar.get_x() + bar.get_width()/2, yval + 0.1, f'{yval:.1f}', ha='center', va='bottom', fontsize=10, fontproperties=prop)
+                            
+                            # 添加顶部汇总标题
+                            title_text = f"🌟 {view_as} 的专属学习周报 🌟\n"
+                            summary_text = f"本周打卡：{days_count} 天 | 累计积分：{total_pts:.1f} 分 | 单日最高：{max_daily_score:.1f} 分"
+                            
+                            if prop:
+                                ax.set_title(title_text, fontproperties=prop, fontsize=18, pad=20, color='#333333', fontweight='bold')
+                                fig.text(0.5, 0.88, summary_text, ha='center', fontsize=14, color='#666666', fontproperties=prop)
+                                # 确保横轴标签也有中文字体
+                                plt.xticks(fontproperties=prop)
+                                plt.yticks(fontproperties=prop)
+                            else:
+                                ax.set_title(title_text, fontsize=18, pad=20, color='#333333', fontweight='bold')
+                                fig.text(0.5, 0.88, summary_text, ha='center', fontsize=14, color='#666666')
+
+                            # 调整布局
+                            plt.tight_layout(rect=[0, 0, 1, 0.85])
+                            
+                            # 保存到内存
+                            buf = io.BytesIO()
+                            fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+                            buf.seek(0)
+                            plt.close(fig)
+                            
+                            st.image(buf, use_container_width=True)
+                            st.download_button(
+                                label="⬇️ 点击保存图片 (发送到微信群)",
+                                data=buf,
+                                file_name=f"{view_as}_周报_{start_date.isoformat()}.png",
+                                mime="image/png",
+                                **_stretch({"type": "secondary"})
+                            )
+                            st.success("图片已生成，点击上方按钮保存并发送给家长吧！")
+                            
+                        except Exception as e:
+                            st.error(f"生成图片失败：{e}")
 
             st.divider()
             time_view = st.radio("时间维度", ["按日查看", "按周查看", "按月查看"], horizontal=True)
