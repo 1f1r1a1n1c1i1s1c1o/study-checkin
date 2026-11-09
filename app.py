@@ -106,6 +106,18 @@ def get_user_now(offset_hours: float) -> datetime:
 def get_user_today(offset_hours: float) -> date:
     return get_user_now(offset_hours).date()
 
+def get_remaining_days(exp_str):
+    if not exp_str: return -1
+    if str(exp_str).startswith("2099"): return 9999
+    try:
+        exp_dt = datetime.strptime(exp_str, '%Y-%m-%d %H:%M:%S')
+        delta = exp_dt - datetime.now()
+        if delta.days < 0: return -1
+        # 向上取整，比如剩 0.5 天也算剩 1 天
+        return max(0, delta.days + (1 if delta.seconds > 0 else 0))
+    except:
+        return -1
+
 DB_PATH = Path(__file__).resolve().parent / "study_points.db"
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 DEFAULT_ICON_BASE64 = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkZEMzAwIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTEyIDJMMTUuMDkgOC4yNkwyMiA5LjI3TDE3IDE0LjE0TDE4LjE4IDIxLjAyTDEyIDE3LjU3TDUuODIgMjEuMDJMOSAxNC4xNEwyIDkuMjdMOC45MSA4LjI2TDEyIDJ6Ij48L3BhdGg+PC9zdmc+"
@@ -311,17 +323,14 @@ def init_db(db):
             except: pass
         db.commit()
 
-    # ================= 给历史老用户补发 3 天试用期 =================
+    # 补发老用户试用期
     try:
         expire_date = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
-        # 普通用户和历史遗留的solo给3天
         db.execute("UPDATE users SET plan_expires_at=? WHERE plan_expires_at IS NULL AND role IN ('user', 'solo')", (expire_date,))
-        # 管理员和家长自动永久
         db.execute("UPDATE users SET plan_expires_at='2099-12-31 23:59:59' WHERE plan_expires_at IS NULL AND role IN ('admin', 'host')")
         db.commit()
     except Exception as e:
         print(f"补发老用户试用期失败: {e}")
-    # ================================================================
 
     try:
         user_count = db.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
@@ -945,11 +954,11 @@ def main():
             role_display = {"admin": "管理员", "host": "家长", "user": "孩子", "solo": "独立用户"}.get(view_role, view_role)
             
             plan_exp_str = ""
-            if view_role in ["user", "solo"] and plan_exp:
-                if str(plan_exp).startswith("2099"):
-                    plan_exp_str = f"\n\n⏳ 到期：永久"
-                else:
-                    plan_exp_str = f"\n\n⏳ 到期：{str(plan_exp)[:10]}"
+            if view_role in ["user", "solo", "admin"]:
+                rem_days = get_remaining_days(plan_exp)
+                if rem_days == 9999: plan_exp_str = "\n\n⏳ 剩余：永久"
+                elif rem_days < 0: plan_exp_str = "\n\n⚠️ 已过期"
+                else: plan_exp_str = f"\n\n⏳ 剩余：{rem_days} 天"
             
             st.info(f"当前身份：{html.escape(view_as)} ({role_display}){plan_exp_str}\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
             try: bal = get_balance(view_as)
@@ -1000,15 +1009,20 @@ def main():
                             try:
                                 if db.execute("SELECT * FROM users WHERE username=?", (new_name,)).fetchone(): st.error("该用户名已被占用")
                                 else:
-                                    for tbl in ["daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
-                                        db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
-                                    db.execute("UPDATE users SET host_id=? WHERE host_id=?", (new_name, current_user))
-                                    db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
-                                    db.commit()
-                                    st.session_state.user = new_name
-                                    st.query_params["user"] = new_name
-                                    st.query_params["auth"] = generate_auth_token(new_name, user_row["password_hash"])
-                                    st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
+                                    db.begin()
+                                    try:
+                                        for tbl in ["daily_records", "period_bonus", "redemptions", "exam_rewards", "special_events", "extra_points", "config_tasks", "config_shop", "config_exam", "config_exam_rules", "config_thresholds", "config_bonus_rules", "config_exam_multihit"]:
+                                            db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
+                                        db.execute("UPDATE users SET host_id=? WHERE host_id=?", (new_name, current_user))
+                                        db.execute("UPDATE redeem_codes SET used_by=? WHERE used_by=?", (new_name, current_user))
+                                        db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
+                                        db.commit(); db.end()
+                                        st.session_state.user = new_name
+                                        st.query_params["user"] = new_name
+                                        st.query_params["auth"] = generate_auth_token(new_name, user_row["password_hash"])
+                                        st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
+                                    except Exception as e:
+                                        db.rollback(); db.end(); st.error(f"修改失败：{str(e)}")
                             except RuntimeError as e: st.error(str(e))
 
                 st.divider()
@@ -1078,23 +1092,30 @@ def main():
                 is_expired = True
         
         if is_expired:
-            st.warning(f"【{view_as}】的内测体验已到期，请向管理员索取兑换码续期。")
+            st.error(f"【{view_as}】的内测体验已到期，请向管理员索取兑换码续费。")
             with st.form(f"redeem_form_{view_as}"):
                 c_code = st.text_input("请输入兑换码")
                 submit = st.form_submit_button("激活", type="primary")
                 if submit and c_code:
                     c_code = c_code.strip().upper()
-                    code_row = db.execute("SELECT * FROM redeem_codes WHERE code=? AND is_used=0", (c_code,)).fetchone()
-                    if code_row:
-                        days = int(code_row["days"])
-                        new_exp = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
-                        db.execute("UPDATE users SET plan_expires_at=? WHERE username=?", (new_exp, view_as))
-                        db.execute("UPDATE redeem_codes SET is_used=1, used_by=? WHERE code=?", (view_as, c_code))
-                        db.commit()
-                        st.success("激活成功！")
-                        st.rerun()
-                    else:
-                        st.error("无效或已被使用的兑换码。")
+                    # 修复并发漏洞：使用事务和条件更新防双花
+                    db.begin()
+                    try:
+                        cur = db.execute("UPDATE redeem_codes SET is_used=1, used_by=? WHERE code=? AND is_used=0", (view_as, c_code))
+                        if getattr(cur, "rowcount", 0) == 0:
+                            db.rollback(); db.end()
+                            st.error("无效或已被使用的兑换码。")
+                        else:
+                            code_row = db.execute("SELECT days FROM redeem_codes WHERE code=?", (c_code,)).fetchone()
+                            days = int(code_row["days"])
+                            new_exp = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+                            db.execute("UPDATE users SET plan_expires_at=? WHERE username=?", (new_exp, view_as))
+                            db.commit(); db.end()
+                            st.success("激活成功！")
+                            st.rerun()
+                    except Exception as e:
+                        db.rollback(); db.end()
+                        st.error(f"激活失败：{str(e)}")
             st.stop()
 
     base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
@@ -1909,9 +1930,7 @@ def main():
                                     if st.button("→ 独立用户", key=f"set_solo_{uname}", disabled=(urole == "solo"), **_stretch({})):
                                         try:
                                             db.execute("UPDATE users SET role='solo' WHERE username=?", (uname,))
-                                            db.commit()
-                                            st.cache_data.clear()
-                                            st.rerun()
+                                            db.commit(); st.cache_data.clear(); st.rerun()
                                         except RuntimeError as e: st.error(str(e))
                                     
                                     if st.button("⭐ 设为永久", key=f"set_perm_{uname}", disabled=is_perm, **_stretch({})):
