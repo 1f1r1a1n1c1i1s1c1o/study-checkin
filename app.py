@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid
+import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid, hmac
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import streamlit as st
@@ -21,6 +21,31 @@ else:
     class DummyPsycopg2:
         class OperationalError(Exception): pass
     psycopg2 = DummyPsycopg2()
+
+# ================= 密码与安全区 =================
+SECRET_KEY = "study-checkin-super-secret-salt-v1"
+
+def generate_auth_token(username: str) -> str:
+    """生成用于保持在 URL 中的校验令牌"""
+    return hmac.new(SECRET_KEY.encode(), username.encode(), hashlib.sha256).hexdigest()
+
+def verify_auth_token(username: str, token: str) -> bool:
+    """验证 URL 令牌是否合法"""
+    if not username or not token:
+        return False
+    return hmac.compare_digest(generate_auth_token(username), token)
+
+def hash_pwd_sha256(pwd: str) -> str:
+    return hashlib.sha256(pwd.encode()).hexdigest()
+
+def hash_pwd_bcrypt(pwd: str) -> str:
+    return bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def check_pwd_bcrypt(pwd: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(pwd.encode('utf-8'), hashed.encode('utf-8'))
+    except ValueError:
+        return False
 
 # ================= 兼容性封装与运维工具 =================
 def _stretch(kwargs):
@@ -65,19 +90,6 @@ def _backup_sqlite():
                     except: pass
         except Exception as e:
             print(f"备份失败: {e}")
-
-# ================= 密码与安全区 =================
-def hash_pwd_sha256(pwd: str) -> str:
-    return hashlib.sha256(pwd.encode()).hexdigest()
-
-def hash_pwd_bcrypt(pwd: str) -> str:
-    return bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-def check_pwd_bcrypt(pwd: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(pwd.encode('utf-8'), hashed.encode('utf-8'))
-    except ValueError:
-        return False
 
 # ================= 时间引擎 =================
 TIMEZONES = {
@@ -972,6 +984,8 @@ def login_page(db):
                         if is_valid:
                             st.session_state.user = u
                             st.session_state.role = user["role"]
+                            st.query_params["user"] = u
+                            st.query_params["auth"] = generate_auth_token(u)
                             if p == "123456":
                                 st.session_state.force_pwd_change = True
                             st.rerun()
@@ -1057,14 +1071,36 @@ def main():
     if old_warn:
         st.warning(old_warn)
 
+    # ---------------- 从 URL 恢复登录状态 ----------------
     if "user" not in st.session_state:
-        login_page(db); return
+        param_user = st.query_params.get("user")
+        param_auth = st.query_params.get("auth")
+        if param_user and param_auth and verify_auth_token(param_user, param_auth):
+            try:
+                row = db.execute("SELECT * FROM users WHERE username=?", (param_user,)).fetchone()
+                if row:
+                    st.session_state.user = row["username"]
+                    st.session_state.role = row["role"]
+                    # 恢复时顺便检查是否还需要强制改密
+                    if check_pwd_bcrypt("123456", row["password_hash"]):
+                        st.session_state.force_pwd_change = True
+                else:
+                    st.query_params.clear()
+                    login_page(db); return
+            except Exception:
+                st.query_params.clear()
+                login_page(db); return
+        else:
+            login_page(db); return
+    # ----------------------------------------------------
 
     current_user = st.session_state.user
     try:
         user_row = db.execute("SELECT * FROM users WHERE username=?", (current_user,)).fetchone()
         if not user_row:
             del st.session_state.user
+            del st.session_state.role
+            st.query_params.clear()
             st.rerun()
     except RuntimeError as e:
         st.error(str(e)); st.stop()
@@ -1279,7 +1315,11 @@ def main():
                                         db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
                                     db.execute("UPDATE users SET host_id=? WHERE host_id=?", (new_name, current_user))
                                     db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
-                                    db.commit(); st.session_state.user = new_name; st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
+                                    db.commit()
+                                    st.session_state.user = new_name
+                                    st.query_params["user"] = new_name
+                                    st.query_params["auth"] = generate_auth_token(new_name)
+                                    st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
                             except RuntimeError as e:
                                 st.error(str(e))
 
@@ -1340,6 +1380,7 @@ def main():
         if st.button("退出登录", **_stretch({})):
             del st.session_state.user
             del st.session_state.role
+            st.query_params.clear()
             st.rerun()
 
     if view_role == "host" and view_as is None:
