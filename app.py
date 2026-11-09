@@ -228,7 +228,6 @@ def get_db():
         return db
 
 def init_db(db):
-    # ============ 【暴力修复】彻底清理 PostgreSQL 所有历史遗留主键与约束 ============
     if db.is_cloud:
         try:
             db.execute("ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_pkey CASCADE")
@@ -1135,7 +1134,6 @@ def main():
 
         bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
 
-        # 初始化 view_as 和 view_role
         view_as = current_user
         view_role = current_role
 
@@ -1184,7 +1182,6 @@ def main():
                     child_names = []
                     
                 if child_names:
-                    # 默认选第一个孩子
                     selected_child = st.selectbox(f"穿透管理：{selected_target} 名下的孩子", child_names, index=0)
                     view_as = selected_child
                     view_role = "user"
@@ -1349,22 +1346,17 @@ def main():
         st.info("暂无绑定的孩子，请联系管理员绑定后再使用。")
         st.stop()
 
-    # ============ 重构 Tab 生成逻辑 ============
     base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
     base_mobile = ["打卡", "商城", "兑换"]
 
-    # 严格根据当前登录人的角色（current_role）和是否手机模式来决定页面显示什么
     if current_role == "admin":
         if is_mobile_mode:
             tabs = base_mobile + ["系统设置"]
         else:
             tabs = base_desktop + ["系统设置"]
-            
     elif current_role == "host":
-        # 家长专属页面，不提供打卡等功能，但有给孩子处理偶发和配置的权限
         tabs = ["历史与图表", "偶发", "系统设置"]
-        
-    else: # current_role == "user" (孩子登录)
+    else:
         if is_mobile_mode:
             tabs = base_mobile
         else:
@@ -1756,28 +1748,164 @@ def main():
             else:
                 st.info(f"当前正在配置：**{html.escape(view_as)}**（身份：{role_names.get(view_role, view_role)}）")
 
-            # ---- 1. 修改每日任务 ----
+            # ---- 1. 修改每日任务 (QQ音乐批量操作模式) ----
             st.markdown("### 1. 修改每日任务")
             sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: WEEKDAY_CN[x])
 
             try:
-                tasks_list = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=? ORDER BY category ASC, name ASC", (sel_wd, view_as)).fetchall()
+                tasks_list = db.execute(
+                    "SELECT * FROM config_tasks WHERE weekday=? AND owner_id=? ORDER BY category ASC, name ASC",
+                    (sel_wd, view_as)).fetchall()
             except Exception:
                 tasks_list = []
 
+            edit_mode_key = f"task_edit_mode_{view_as}_{sel_wd}"
+            if edit_mode_key not in st.session_state:
+                st.session_state[edit_mode_key] = False
+
+            header_cols = st.columns([3, 1])
+            header_cols[0].markdown(f"**{WEEKDAY_CN[sel_wd]} 当前任务（共 {len(tasks_list)} 项）**")
+            if header_cols[1].button("完成编辑" if st.session_state[edit_mode_key] else "✏️ 编辑", key=f"toggle_edit_{view_as}_{sel_wd}"):
+                st.session_state[edit_mode_key] = not st.session_state[edit_mode_key]
+                st.rerun()
+
+            selected_task_ids = []
             if tasks_list:
-                st.markdown(f"**{WEEKDAY_CN[sel_wd]} 当前任务（共 {len(tasks_list)} 项）**")
                 for t in tasks_list:
-                    tc1, tc2, tc3, tc4 = st.columns([2, 4, 2, 1])
-                    tc1.write(f"`{html.escape(str(t.get('category') or ''))}`")
-                    tc2.write(f"**{html.escape(str(t['name']))}**")
-                    tc3.write(f"{float(t['points'] or 0)} 分")
-                    if tc4.button("🗑 删除", key=f"del_task_{view_as}_{sel_wd}_{t['id']}", **_stretch({"type": "primary"})):
-                        try:
-                            db.execute("DELETE FROM config_tasks WHERE id=? AND owner_id=?", (t["id"], view_as))
-                            db.commit(); st.cache_data.clear(); st.success("已删除该任务"); st.rerun()
-                        except RuntimeError as e:
-                            st.error(str(e))
+                    if st.session_state[edit_mode_key]:
+                        c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
+                        if c1.checkbox("", key=f"chk_{view_as}_{sel_wd}_{t['id']}", label_visibility="collapsed"):
+                            selected_task_ids.append(t["id"])
+                        c2.write(f"`{html.escape(str(t.get('category') or ''))}`")
+                        c3.write(f"**{html.escape(str(t['name']))}**")
+                        c4.write(f"{float(t['points'] or 0)} 分")
+                    else:
+                        c1, c2, c3 = st.columns([2, 4, 2])
+                        c1.write(f"`{html.escape(str(t.get('category') or ''))}`")
+                        c2.write(f"**{html.escape(str(t['name']))}**")
+                        c3.write(f"{float(t['points'] or 0)} 分")
+                
+                # 底部操作栏（仅在编辑模式显示）
+                if st.session_state[edit_mode_key]:
+                    st.divider()
+                    if selected_task_ids:
+                        st.write(f"已选中 **{len(selected_task_ids)}** 项")
+                        
+                        ac1, ac2, ac3 = st.columns(3)
+                        
+                        # 单选编辑
+                        if len(selected_task_ids) == 1:
+                            with ac1:
+                                if st.button("✏️ 编辑选中任务", **_stretch({})):
+                                    st.session_state[f"editing_task_id_{view_as}_{sel_wd}"] = selected_task_ids[0]
+                        
+                        # 多选批量删除
+                        with ac2:
+                            if st.button("🗑 删除选中任务", **_stretch({"type": "primary"})):
+                                db.begin()
+                                try:
+                                    placeholders = ",".join(["?"] * len(selected_task_ids))
+                                    db.execute(f"DELETE FROM config_tasks WHERE id IN ({placeholders}) AND owner_id=?", (*selected_task_ids, view_as))
+                                    db.commit()
+                                    db.end()
+                                    st.cache_data.clear()
+                                    st.success("批量删除成功！")
+                                    st.rerun()
+                                except Exception as e:
+                                    db.rollback()
+                                    db.end()
+                                    st.error(f"删除失败：{e}")
+                                    
+                        # 批量同步
+                        with ac3:
+                            if st.button("🔄 同步到其他星期", **_stretch({})):
+                                st.session_state[f"syncing_tasks_{view_as}_{sel_wd}"] = selected_task_ids
+                                
+                        # 编辑表单
+                        edit_task_id = st.session_state.get(f"editing_task_id_{view_as}_{sel_wd}")
+                        if edit_task_id:
+                            t_to_edit = next((x for x in tasks_list if x["id"] == edit_task_id), None)
+                            if t_to_edit:
+                                st.info(f"正在编辑：{t_to_edit['name']}")
+                                with st.form(f"edit_task_form_{view_as}_{sel_wd}_{edit_task_id}"):
+                                    ec1, ec2, ec3 = st.columns([2, 3, 2])
+                                    e_cat = ec1.text_input("分类", value=t_to_edit["category"] or "", key=f"ec_{edit_task_id}")
+                                    e_name = ec2.text_input("任务名称", value=t_to_edit["name"], key=f"en_{edit_task_id}")
+                                    e_pts = ec3.text_input("分数", value=str(t_to_edit["points"]), key=f"ep_{edit_task_id}")
+                                    
+                                    col_save, col_cancel = st.columns(2)
+                                    if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
+                                        if not e_name.strip():
+                                            st.error("任务名称不能为空")
+                                        else:
+                                            try:
+                                                pts_val = float(e_pts.strip() or "0")
+                                                db.execute(
+                                                    "UPDATE config_tasks SET category=?, name=?, points=? WHERE id=? AND owner_id=?",
+                                                    (e_cat.strip(), e_name.strip(), pts_val, edit_task_id, view_as)
+                                                )
+                                                db.commit()
+                                                st.cache_data.clear()
+                                                st.session_state.pop(f"editing_task_id_{view_as}_{sel_wd}", None)
+                                                st.success("任务已更新！")
+                                                st.rerun()
+                                            except ValueError:
+                                                st.error("分数必须为数字")
+                                            except RuntimeError as ex:
+                                                st.error(str(ex))
+                                    if col_cancel.form_submit_button("取消编辑", use_container_width=True):
+                                        st.session_state.pop(f"editing_task_id_{view_as}_{sel_wd}", None)
+                                        st.rerun()
+
+                        # 同步表单
+                        syncing_ids = st.session_state.get(f"syncing_tasks_{view_as}_{sel_wd}")
+                        if syncing_ids:
+                            st.info(f"将选中的 {len(syncing_ids)} 个任务同步到以下星期：")
+                            with st.form(f"sync_tasks_form_{view_as}_{sel_wd}"):
+                                target_days = []
+                                scols = st.columns(7)
+                                for i in range(7):
+                                    if i != sel_wd:
+                                        if scols[i].checkbox(WEEKDAY_CN[i], key=f"sync_day_{view_as}_{sel_wd}_{i}"):
+                                            target_days.append(i)
+                                    else:
+                                        scols[i].caption("当前星期")
+                                
+                                if st.form_submit_button("确认同步", type="primary", use_container_width=True):
+                                    if not target_days:
+                                        st.warning("请至少选择一个目标星期")
+                                    else:
+                                        db.begin()
+                                        try:
+                                            tasks_to_sync = [x for x in tasks_list if x["id"] in syncing_ids]
+                                            for target_wd in target_days:
+                                                for t in tasks_to_sync:
+                                                    # 防重：如果存在同名同分类任务则跳过
+                                                    existing = db.execute(
+                                                        "SELECT 1 FROM config_tasks WHERE weekday=? AND owner_id=? AND name=? AND category=?",
+                                                        (target_wd, view_as, t["name"], t["category"])
+                                                    ).fetchone()
+                                                    if not existing:
+                                                        new_id = uuid.uuid4().hex
+                                                        db.execute(
+                                                            "INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)",
+                                                            (new_id, target_wd, view_as, t["category"], t["name"], t["points"])
+                                                        )
+                                            db.commit()
+                                            db.end()
+                                            st.cache_data.clear()
+                                            st.success("任务同步成功！")
+                                            st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None)
+                                            st.rerun()
+                                        except Exception as ex:
+                                            db.rollback()
+                                            db.end()
+                                            st.error(f"同步失败：{ex}")
+                            if st.button("取消同步", key=f"cancel_sync_{view_as}_{sel_wd}"):
+                                st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None)
+                                st.rerun()
+                    else:
+                        st.caption("请勾选任务以进行编辑、删除或同步操作。")
             else:
                 st.caption("当前星期暂无任务。")
 
