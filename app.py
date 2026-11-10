@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 【安全加固版本】
+# 本次 5 项改动：
+# 1. SECRET_KEY 从硬编码改为 st.secrets → 环境变量 → 随机兜底
+# 2. 登录 token 改为带过期时间的自包含 token（默认 7 天），改密后旧 token 自动失效
+# 3. 密保答案从无盐 SHA256 改为 bcrypt（新数据），旧 SHA256 数据仍可验证（兼容）
+# 4. 初始管理员不再使用默认密码 admin123，未配置时随机生成并在日志中输出
+# 5. 数据库错误信息对外脱敏（通用文案），详细错误只写入 error.log
 import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid, hmac
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -172,15 +179,48 @@ def render_language_selector(key_suffix=""):
     return False
 
 # ================= 密码与安全区 =================
-SECRET_KEY = "study-checkin-super-secret-salt-v1"
+# 【安全加固 1】SECRET_KEY 三级兜底：st.secrets → 环境变量 → 随机生成（仅本次运行有效）
+def get_secret_key():
+    try:
+        if "SECRET_KEY" in st.secrets and st.secrets["SECRET_KEY"]:
+            return str(st.secrets["SECRET_KEY"])
+    except Exception:
+        pass
+    env_key = os.getenv("SECRET_KEY")
+    if env_key:
+        return env_key
+    temp = secrets.token_hex(32)
+    print("⚠️ 未配置 SECRET_KEY，使用临时随机密钥，重启后所有登录会话将失效。请在 Streamlit Secrets 或环境变量中配置 SECRET_KEY。")
+    return temp
 
-def generate_auth_token(username: str, pwd_hash: str) -> str:
-    return hmac.new((SECRET_KEY + pwd_hash).encode(), username.encode(), hashlib.sha256).hexdigest()
+SECRET_KEY = get_secret_key()
+
+# 【安全加固 2】token 改为自包含 + 带过期时间（默认 7 天），改密即失效
+def generate_auth_token(username: str, pwd_hash: str, expire_days: int = 7) -> str:
+    expire_ts = int((datetime.now(timezone.utc) + timedelta(days=expire_days)).timestamp())
+    payload = f"{username}|{expire_ts}"
+    sig = hmac.new((SECRET_KEY + pwd_hash).encode(), payload.encode(), hashlib.sha256).hexdigest()
+    raw = f"{payload}|{sig}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 def verify_auth_token(username: str, token: str, pwd_hash: str) -> bool:
     if not username or not token or not pwd_hash:
         return False
-    return hmac.compare_digest(generate_auth_token(username, pwd_hash), token)
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode()).decode()
+        parts = raw.split("|")
+        if len(parts) != 3:
+            return False
+        t_user, t_exp, t_sig = parts
+        if t_user != username:
+            return False
+        if int(t_exp) < int(datetime.now(timezone.utc).timestamp()):
+            return False
+        expected = hmac.new((SECRET_KEY + pwd_hash).encode(), f"{t_user}|{t_exp}".encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, t_sig)
+    except Exception:
+        return False
 
 def hash_pwd_sha256(pwd: str) -> str:
     return hashlib.sha256(pwd.encode()).hexdigest()
@@ -193,6 +233,22 @@ def check_pwd_bcrypt(pwd: str, hashed: str) -> bool:
         return bcrypt.checkpw(pwd.encode('utf-8'), hashed.encode('utf-8'))
     except ValueError:
         return False
+
+# 【安全加固 3】密保答案改用 bcrypt；verify 兼容旧 SHA256，自动识别
+def hash_security_answer(ans: str) -> str:
+    return hash_pwd_bcrypt(ans.strip().lower())
+
+def verify_security_answer(ans: str, stored: str) -> bool:
+    if not stored:
+        return False
+    try:
+        if stored.startswith("$2"):
+            return check_pwd_bcrypt(ans.strip().lower(), stored)
+        if len(stored) == 64:
+            return hashlib.sha256(ans.strip().lower().encode()).hexdigest() == stored
+    except Exception:
+        pass
+    return False
 
 # ================= 兼容性封装与运维工具 =================
 def _stretch(kwargs):
@@ -350,7 +406,8 @@ class DBWrapper:
         except Exception as e:
             if self.is_cloud: st.cache_resource.clear()
             _log_db_error("execute", str(e))
-            raise RuntimeError(f"数据库操作失败，请刷新重试。({str(e)})")
+            # 【安全加固 5】对外通用文案，详细错误只写日志
+            raise RuntimeError("数据库操作失败，请刷新重试。")
     
     def executemany(self, query, params_list):
         try:
@@ -365,7 +422,8 @@ class DBWrapper:
         except Exception as e:
             if self.is_cloud: st.cache_resource.clear()
             _log_db_error("executemany", str(e))
-            raise RuntimeError(f"数据库批量操作失败。({str(e)})")
+            # 【安全加固 5】对外通用文案，详细错误只写日志
+            raise RuntimeError("数据库批量操作失败，请稍后重试。")
 
     def commit(self): self.conn.commit()
 
@@ -380,7 +438,9 @@ def get_db():
             return db
         except Exception as e:
             st.cache_resource.clear()
-            raise RuntimeError(f"数据库连接失败，请检查密码是否正确或稍后再试。({str(e)})")
+            _log_db_error("get_db", str(e))
+            # 【安全加固 5】对外通用文案
+            raise RuntimeError("数据库连接失败，请稍后重试。")
     else:
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -497,15 +557,20 @@ def init_db(db):
     except Exception as e:
         print(f"补发老用户试用期失败: {e}")
 
+    # 【安全加固 4】去掉默认 admin123；未配置时随机生成
     try:
         user_count = db.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
         if user_count == 0:
             admin_user = os.getenv("INIT_ADMIN_USER", "admin")
-            admin_pwd = os.getenv("INIT_ADMIN_PWD", "admin123")
+            admin_pwd = os.getenv("INIT_ADMIN_PWD", "")
+            generated = False
+            if not admin_pwd:
+                admin_pwd = secrets.token_urlsafe(12)
+                generated = True
             admin_sa = secrets.token_urlsafe(12)
-            print(f"⚠️ 生成初始管理员: {admin_user} / {admin_pwd}")
+            print(f"⚠️ 生成初始管理员: {admin_user} / {admin_pwd}" + (" (随机生成，请立即查看日志并登录后修改密码)" if generated else ""))
             db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer, plan_expires_at) VALUES (?, ?, 'admin', ?, ?, '2099-12-31 23:59:59')",
-                       (admin_user, hash_pwd_bcrypt(admin_pwd), "初始密保", hash_pwd_sha256(admin_sa.strip().lower())))
+                       (admin_user, hash_pwd_bcrypt(admin_pwd), "初始密保", hash_security_answer(admin_sa)))
             if not db.execute("SELECT * FROM config_tasks WHERE owner_id=?", (admin_user,)).fetchone():
                 init_old_admin_data(db, admin_user)
             db.commit()
@@ -994,7 +1059,8 @@ def login_page(db):
                             st.rerun()
                         else: st.error(t("wrong_creds"))
                     else: st.error(t("wrong_creds"))
-                except RuntimeError as e: st.error(str(e))
+                except RuntimeError:
+                    st.error("操作失败，请稍后重试。")
 
     with tab2:
         with st.form(f"reg_form_{uid}"):
@@ -1012,13 +1078,15 @@ def login_page(db):
                         if db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error(t("user_exists"))
                         else:
                             trial_exp = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+                            # 【安全加固 3】密保用 bcrypt 存储
                             db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer, plan_expires_at, language) VALUES (?, ?, 'user', ?, ?, ?, ?)",
-                                (u, hash_pwd_bcrypt(p), sq, hash_pwd_sha256(sa.strip().lower()), trial_exp, get_lang()))
+                                (u, hash_pwd_bcrypt(p), sq, hash_security_answer(sa), trial_exp, get_lang()))
                             db.commit()
                             try: init_old_admin_data(db, u)
                             except Exception as e: print(f"初始化新用户默认配置失败（静默处理）: {e}")
                             st.cache_data.clear(); st.success(t("register_ok"))
-                    except RuntimeError as e: st.error(str(e))
+                    except RuntimeError:
+                        st.error("操作失败，请稍后重试。")
 
     with tab3:
         st.write(t("reset_intro"))
@@ -1036,18 +1104,20 @@ def login_page(db):
                             new_p = st.text_input(t("new_password"), type="password", max_chars=72)
                             if _submit(t("reset_btn"), **_stretch({"type": "primary"})):
                                 if not ans or not new_p: st.error(t("fill_all"))
-                                elif hash_pwd_sha256(ans.strip().lower()) == user["security_answer"]:
+                                # 【安全加固 3】用 verify_security_answer 兼容旧 SHA256 与新 bcrypt
+                                elif verify_security_answer(ans, user["security_answer"]):
                                     new_hash = hash_pwd_bcrypt(new_p)
                                     db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, u_reset))
                                     db.commit(); st.success(t("reset_ok"))
                                 else: st.error(t("wrong_answer"))
                 else: st.error(t("user_not_exist"))
-            except RuntimeError as e: st.error(str(e))
+            except RuntimeError:
+                st.error("操作失败，请稍后重试。")
 
 def main():
     st.set_page_config(page_title="学习打卡系统", layout="centered", initial_sidebar_state="collapsed")
     try: db = get_db()
-    except RuntimeError as e: st.error(str(e)); st.stop()
+    except RuntimeError: st.error("数据库连接失败，请稍后重试。"); st.stop()
 
     old_warn = st.session_state.get("_old_sqlite_warning")
     if old_warn: st.warning(old_warn)
@@ -1076,7 +1146,7 @@ def main():
         user_row = db.execute("SELECT * FROM users WHERE username=?", (current_user,)).fetchone()
         if not user_row:
             del st.session_state.user; del st.session_state.role; st.query_params.clear(); st.rerun()
-    except RuntimeError as e: st.error(str(e)); st.stop()
+    except RuntimeError: st.error("操作失败，请稍后重试。"); st.stop()
 
     if st.session_state.get("force_pwd_change"):
         st.title("⚠️ 安全提示：请修改默认密码")
@@ -1098,7 +1168,7 @@ def main():
                         del st.session_state.force_pwd_change
                         st.query_params["auth"] = generate_auth_token(current_user, new_hash)
                         st.success("✅ 密码修改成功！正在进入系统..."); st.rerun()
-                    except RuntimeError as e: st.error(str(e))
+                    except RuntimeError: st.error("操作失败，请稍后重试。")
         st.stop()
 
     current_role = user_row["role"]
@@ -1226,7 +1296,7 @@ def main():
                 else: final_tz = TIMEZONES[new_tz_name]
                 if st.button(t("save_tz"), **_stretch({})):
                     try: db.execute("UPDATE users SET timezone_offset=? WHERE username=?", (final_tz, current_user)); db.commit(); st.success("时区已更新！"); st.rerun()
-                    except RuntimeError as e: st.error(str(e))
+                    except RuntimeError: st.error("操作失败，请稍后重试。")
 
                 st.divider()
                 new_name = st.text_input(t("new_username"), placeholder=t("leave_blank"), max_chars=20)
@@ -1249,9 +1319,9 @@ def main():
                                         st.query_params["user"] = new_name
                                         st.query_params["auth"] = generate_auth_token(new_name, user_row["password_hash"])
                                         st.cache_data.clear(); st.success("用户名修改成功！"); st.rerun()
-                                    except Exception as e:
-                                        db.rollback(); db.end(); st.error(f"修改失败：{str(e)}")
-                            except RuntimeError as e: st.error(str(e))
+                                    except Exception:
+                                        db.rollback(); db.end(); st.error("修改失败，请稍后重试。")
+                            except RuntimeError: st.error("操作失败，请稍后重试。")
 
                 st.divider()
                 new_pwd = st.text_input(t("new_password"), type="password", key="new_pwd", max_chars=72)
@@ -1263,7 +1333,7 @@ def main():
                             db.commit()
                             st.query_params["auth"] = generate_auth_token(current_user, new_hash)
                             st.success("密码已修改！")
-                        except RuntimeError as e: st.error(str(e))
+                        except RuntimeError: st.error("操作失败，请稍后重试。")
 
                 st.divider()
                 st.markdown(f"**{t('change_security')}**")
@@ -1273,16 +1343,17 @@ def main():
                     if not new_sq or not new_sa: st.error("密保问题和答案不能为空")
                     else:
                         try:
-                            hashed_sa = hash_pwd_sha256(new_sa.strip().lower())
+                            # 【安全加固 3】密保改用 bcrypt
+                            hashed_sa = hash_security_answer(new_sa)
                             db.execute("UPDATE users SET security_question=?, security_answer=? WHERE username=?", (new_sq, hashed_sa, current_user))
                             db.commit(); st.success("密保已修改！")
-                        except RuntimeError as e: st.error(str(e))
+                        except RuntimeError: st.error("操作失败，请稍后重试。")
 
                 st.divider()
                 webhook_input = st.text_input(t("webhook"), value=user_row.get("webhook_url") or "")
                 if st.button(t("save_webhook"), **_stretch({})):
                     try: db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user)); db.commit(); st.success("保存成功！")
-                    except RuntimeError as e: st.error(str(e))
+                    except RuntimeError: st.error("操作失败，请稍后重试。")
 
                 st.divider()
                 try:
@@ -1340,14 +1411,13 @@ def main():
                             db.commit(); db.end()
                             st.success("激活成功！")
                             st.rerun()
-                    except Exception as e:
+                    except Exception:
                         db.rollback(); db.end()
-                        st.error(f"激活失败：{str(e)}")
+                        st.error("激活失败，请检查兑换码或稍后重试。")
             st.stop()
 
     base_desktop = [t("tab_checkin"), t("tab_extra"), t("tab_history"), t("tab_shop"), t("tab_redeem"), t("tab_exam"), t("tab_event")]
     base_mobile = [t("tab_checkin"), t("tab_shop"), t("tab_redeem")]
-    # 孩子（user）桌面/手机模式均加入排行榜
     base_desktop_user = [t("tab_checkin"), t("tab_leaderboard"), t("tab_history"), t("tab_shop"), t("tab_redeem"), t("tab_exam"), t("tab_event")]
     base_mobile_user = [t("tab_checkin"), t("tab_leaderboard"), t("tab_shop"), t("tab_redeem")]
 
@@ -1401,7 +1471,7 @@ def main():
                             db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)); db.commit()
                             recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat())
                             st.cache_data.clear(); st.rerun()
-                        except RuntimeError as e: st.error(str(e))
+                        except RuntimeError: st.error("操作失败，请稍后重试。")
                 else:
                     base_now = sum(task["points"] for task in tasks if task["id"] in set(selected_ids))
                     try:
@@ -1413,20 +1483,19 @@ def main():
                     if detail.get("tier") in TIER_CN: st.info(f"{t('bonus')}: {TIER_CN[detail['tier']]}")
                     if st.button(t("save_checkin"), **_stretch({"type": "primary"})):
                         try: save_day(db, view_today, selected_ids, view_as, now.isoformat()); st.success(t("saved")); st.rerun()
-                        except RuntimeError as e: st.error(str(e))
+                        except RuntimeError: st.error("操作失败，请稍后重试。")
 
     # ============ 排行榜（host + user） ============
     if t("tab_leaderboard") in tab_dict and current_role in ("host", "user"):
         with tab_dict[t("tab_leaderboard")]:
             st.subheader(t("leaderboard_title"))
-            # 取要比较的孩子列表：host 直接查；user 先查自己的 host，再取该 host 名下所有孩子
             if current_role == "host":
                 try:
                     child_rows = db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()
                     lb_children = [r["username"] for r in child_rows]
                 except Exception:
                     lb_children = []
-            else:  # user
+            else:
                 try:
                     my_row = db.execute("SELECT host_id FROM users WHERE username=?", (current_user,)).fetchone()
                     my_host = dict(my_row).get("host_id") if my_row else None
@@ -1474,7 +1543,7 @@ def main():
                 if _submit("确认提交", **_stretch({"type": "primary"})):
                     if e_name:
                         try: db.execute("INSERT INTO extra_points (owner_id, name, points, ts) VALUES (?,?,?,?)", (view_as, e_name, e_pts, now.isoformat())); db.commit(); st.cache_data.clear(); st.success(f"已记录：{html.escape(e_name)} ({e_pts}分)"); st.rerun()
-                        except RuntimeError as e: st.error(str(e))
+                        except RuntimeError: st.error("操作失败，请稍后重试。")
             st.divider()
             try: ex_rows = db.execute("SELECT * FROM extra_points WHERE owner_id=? ORDER BY id DESC LIMIT 20", (view_as,)).fetchall()
             except: ex_rows = []
@@ -1482,7 +1551,7 @@ def main():
                 st.dataframe([{"时间": r["ts"], "事件": html.escape(r["name"]), "积分": float(r["points"] or 0)} for r in ex_rows], use_container_width=True, hide_index=True)
                 if st.button("清空偶发记录", **_stretch({})):
                     try: db.execute("DELETE FROM extra_points WHERE owner_id=?", (view_as,)); db.commit(); st.cache_data.clear(); st.rerun()
-                    except RuntimeError as e: st.error(str(e))
+                    except RuntimeError: st.error("操作失败，请稍后重试。")
             else: st.caption("暂无记录")
 
     # ============ 历史与图表 ============
@@ -1518,8 +1587,8 @@ def main():
                                         db.commit(); db.end()
                                         recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat())
                                         st.cache_data.clear(); st.success("补签成功！"); st.rerun()
-                                except Exception as e:
-                                    db.rollback(); db.end(); st.error(f"补签失败，请重试：{str(e)}")
+                                except Exception:
+                                    db.rollback(); db.end(); st.error("补签失败，请重试。")
                     else: st.info("最近 7 天全勤！")
                 else: st.info('💡 提示：商城有售「补签卡」。')
 
@@ -1591,8 +1660,8 @@ def main():
                                 **_stretch({"type": "secondary"})
                             )
                             st.success("图片已生成，点击上方按钮保存并发送给家长吧！")
-                        except Exception as e:
-                            st.error(f"生成图片失败：{e}")
+                        except Exception:
+                            st.error("生成图片失败，请稍后重试。")
 
             st.divider()
             time_view = st.radio("时间维度", ["按日查看", "按周查看", "按月查看"], horizontal=True)
@@ -1650,8 +1719,8 @@ def main():
                                     if name == "补签卡": db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
                                     db.commit(); db.end()
                                     st.session_state[confirm_key] = False; st.cache_data.clear(); st.success(t("redeem_ok")); st.rerun()
-                            except Exception as e:
-                                db.rollback(); db.end(); st.error(f"兑换失败：{str(e)}")
+                            except Exception:
+                                db.rollback(); db.end(); st.error("兑换失败，请稍后重试。")
                         if cc2.button(t("cancel") if "cancel" in LANG_PACKS[get_lang()] else "取消", key=f"no_{view_as}_{name}", **_stretch({})):
                             st.session_state[confirm_key] = False; st.rerun()
                     else:
@@ -1703,7 +1772,7 @@ def main():
                         detail_text = f"达成 {hit_count} 门 | " + "/".join([f"{k}:{v}" for k, v in scores.items()])
                         db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
                         db.commit(); st.cache_data.clear(); st.success("已保存！"); st.rerun()
-                    except RuntimeError as e: st.error(str(e))
+                    except RuntimeError: st.error("操作失败，请稍后重试。")
 
     # ============ 事件 ============
     if t("tab_event") in tab_dict:
@@ -1722,7 +1791,7 @@ def main():
                             pts = random.randint(1, 2) if roll < 0.4 else random.randint(3, 5) if roll < 0.8 else random.randint(6, 8) if roll < 0.95 else random.randint(10, 15)
                             db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (view_today.isoformat(), view_as, pts, "积分暴击", now.isoformat()))
                             db.commit(); st.session_state["confirm_roll"] = False; st.cache_data.clear(); st.balloons(); st.success(f"获得 {pts} 积分！"); st.rerun()
-                        except RuntimeError as e: st.error(str(e))
+                        except RuntimeError: st.error("操作失败，请稍后重试。")
                     if rc2.button("取消", **_stretch({})): st.session_state["confirm_roll"] = False; st.rerun()
                 else:
                     if st.button("摇一摇", **_stretch({})): st.session_state["confirm_roll"] = True; st.rerun()
@@ -1773,7 +1842,7 @@ def main():
                                     placeholders = ",".join(["?"] * len(selected_task_ids))
                                     db.execute(f"DELETE FROM config_tasks WHERE id IN ({placeholders}) AND owner_id=?", (*selected_task_ids, view_as))
                                     db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception as e: db.rollback(); db.end(); st.error(f"删除失败：{e}")
+                                except Exception: db.rollback(); db.end(); st.error("删除失败，请稍后重试。")
                         with ac3:
                             if st.button("🔄 同步到其他星期", **_stretch({})): st.session_state[f"syncing_tasks_{view_as}_{sel_wd}"] = selected_task_ids
 
@@ -1796,7 +1865,7 @@ def main():
                                                 db.execute("UPDATE config_tasks SET category=?, name=?, points=? WHERE id=? AND owner_id=?", (e_cat.strip(), e_name.strip(), pts_val, edit_task_id, view_as))
                                                 db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_task_id_{view_as}_{sel_wd}", None); st.success("任务已更新！"); st.rerun()
                                             except ValueError: st.error("分数必须为数字")
-                                            except RuntimeError as ex: st.error(str(ex))
+                                            except RuntimeError: st.error("操作失败，请稍后重试。")
                                     if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_task_id_{view_as}_{sel_wd}", None); st.rerun()
 
                         syncing_ids = st.session_state.get(f"syncing_tasks_{view_as}_{sel_wd}")
@@ -1820,7 +1889,7 @@ def main():
                                                     new_id = uuid.uuid4().hex
                                                     db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?) ON CONFLICT (owner_id, weekday, category, name) DO NOTHING", (new_id, target_wd, view_as, task["category"], task["name"], task["points"]))
                                             db.commit(); db.end(); st.cache_data.clear(); st.success("任务同步成功！"); st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None); st.rerun()
-                                        except Exception as ex: db.rollback(); db.end(); st.error(f"同步失败：{ex}")
+                                        except Exception: db.rollback(); db.end(); st.error("同步失败，请稍后重试。")
                             if st.button("取消同步", key=f"cancel_sync_{view_as}_{sel_wd}"): st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None); st.rerun()
                     else: st.caption("请勾选任务以进行编辑、删除或同步操作。")
             else: st.caption("当前星期暂无任务。")
@@ -1842,7 +1911,7 @@ def main():
                                 task_id = uuid.uuid4().hex
                                 db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (task_id, sel_wd, view_as, new_cat.strip(), new_name.strip(), float(pts_val)))
                                 db.commit(); st.cache_data.clear(); st.success("任务已添加！"); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
+                            except RuntimeError: st.error("操作失败，请稍后重试。")
 
             # ---- 2. 修改商城奖励 ----
             st.divider(); st.markdown("### 2. 修改商城奖励")
@@ -1879,7 +1948,7 @@ def main():
                                     placeholders = ",".join(["?"] * len(selected_shop_ids))
                                     db.execute(f"DELETE FROM config_shop WHERE id IN ({placeholders}) AND owner_id=?", (*selected_shop_ids, view_as))
                                     db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception as e: db.rollback(); db.end(); st.error(f"删除失败：{e}")
+                                except Exception: db.rollback(); db.end(); st.error("删除失败，请稍后重试。")
                         edit_shop_id = st.session_state.get(f"editing_shop_id_{view_as}")
                         if edit_shop_id:
                             s_to_edit = next((x for x in shop_list if x["id"] == edit_shop_id), None)
@@ -1898,7 +1967,7 @@ def main():
                                                 db.execute("UPDATE config_shop SET name=?, cost=? WHERE id=? AND owner_id=?", (e_name.strip(), c_val, edit_shop_id, view_as))
                                                 db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_shop_id_{view_as}", None); st.success("奖励已更新！"); st.rerun()
                                             except ValueError: st.error("积分必须为数字")
-                                            except RuntimeError as ex: st.error(str(ex))
+                                            except RuntimeError: st.error("操作失败，请稍后重试。")
                                     if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_shop_id_{view_as}", None); st.rerun()
                     else: st.caption("请勾选奖励以进行编辑或删除操作。")
             else: st.caption("暂无商城奖励。")
@@ -1916,7 +1985,7 @@ def main():
                         except ValueError: st.error("所需积分必须为数字")
                         if cost_val is not None:
                             try: db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (view_as, new_shop_name.strip(), float(cost_val))); db.commit(); st.cache_data.clear(); st.success("奖励已添加！"); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
+                            except RuntimeError: st.error("操作失败，请稍后重试。")
 
             # ---- 3. 修改考试科目 ----
             st.divider(); st.markdown("### 3. 修改考试科目")
@@ -1959,7 +2028,7 @@ def main():
                                     placeholders = ",".join(["?"] * len(selected_exam_subs))
                                     db.execute(f"DELETE FROM config_exam WHERE subject IN ({placeholders}) AND owner_id=?", (*selected_exam_subs, view_as))
                                     db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception as e: db.rollback(); db.end(); st.error(f"删除失败：{e}")
+                                except Exception: db.rollback(); db.end(); st.error("删除失败，请稍后重试。")
                         edit_sub = st.session_state.get(f"editing_exam_sub_{view_as}")
                         if edit_sub and edit_sub in exam_config:
                             cfg = exam_config[edit_sub]
@@ -1987,7 +2056,7 @@ def main():
                                             db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (e_sub.strip(), view_as, json.dumps(cfg_new)))
                                             db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_exam_sub_{view_as}", None); st.success("科目已更新！"); st.rerun()
                                         except ValueError: st.error("分数/目标必须为数字")
-                                        except RuntimeError as ex: st.error(str(ex))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                 if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_exam_sub_{view_as}", None); st.rerun()
                     else: st.caption("请勾选科目以进行编辑或删除操作。")
             else: st.caption("暂无考试科目。")
@@ -2019,7 +2088,7 @@ def main():
                                         cfg = {"type": "score", "max_score": max_val, "target": target_val, "step": step_val, "step_points": step_pts_val}
                                         db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_exam_sub.strip(), view_as, json.dumps(cfg)))
                                         db.commit(); st.cache_data.clear(); st.success("科目已添加！"); st.rerun()
-                                except RuntimeError as e: st.error(str(e))
+                                except RuntimeError: st.error("操作失败，请稍后重试。")
             else:
                 with st.form(f"add_exam_grade_form_{view_as}", clear_on_submit=True):
                     ec1, ec2, ec3 = st.columns([3, 3, 2])
@@ -2038,7 +2107,7 @@ def main():
                                         cfg = {"type": "grade", "target": new_exam_target, "step_points": step_pts_val}
                                         db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_exam_sub.strip(), view_as, json.dumps(cfg)))
                                         db.commit(); st.cache_data.clear(); st.success("科目已添加！"); st.rerun()
-                                except RuntimeError as e: st.error(str(e))
+                                except RuntimeError: st.error("操作失败，请稍后重试。")
 
             # ---- 4. 修改多科达成奖励 ----
             st.divider(); st.markdown("### 4. 修改多科达成奖励")
@@ -2075,7 +2144,7 @@ def main():
                                     placeholders = ",".join(["?"] * len(selected_mh_counts))
                                     db.execute(f"DELETE FROM config_exam_multihit WHERE hit_count IN ({placeholders}) AND owner_id=?", (*selected_mh_counts, view_as))
                                     db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception as e: db.rollback(); db.end(); st.error(f"删除失败：{e}")
+                                except Exception: db.rollback(); db.end(); st.error("删除失败，请稍后重试。")
                         edit_mh_count = st.session_state.get(f"editing_mh_count_{view_as}")
                         if edit_mh_count:
                             mh_to_edit = next((x for x in mh_list if x["hit_count"] == edit_mh_count), None)
@@ -2096,7 +2165,7 @@ def main():
                                                 db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (c_val, view_as, p_val))
                                                 db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_mh_count_{view_as}", None); st.success("档位已更新！"); st.rerun()
                                         except ValueError: st.error("科目数和奖励分数必须为数字")
-                                        except RuntimeError as ex: st.error(str(ex))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                     if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_mh_count_{view_as}", None); st.rerun()
                     else: st.caption("请勾选档位以进行编辑或删除操作。")
             else: st.caption("暂无多科达成奖励配置。")
@@ -2115,7 +2184,7 @@ def main():
                             try:
                                 if db.execute("SELECT * FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (count_val, view_as)).fetchone(): st.warning("该达成科目数已存在，请先删除旧配置。")
                                 else: db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (count_val, view_as, float(pts_val))); db.commit(); st.cache_data.clear(); st.success("档位已添加！"); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
+                            except RuntimeError: st.error("操作失败，请稍后重试。")
 
             # ---- 5. 修改阈值与 Bonus 规则 ----
             st.divider(); st.markdown("### 5. 修改阈值与 Bonus 规则（阈值与 Bonus 规则下次打卡时生效）")
@@ -2160,7 +2229,7 @@ def main():
                         db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
                         db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(new_bonus)))
                         db.commit(); st.cache_data.clear(); st.success("✅ 新规则已保存，下次打卡时生效。"); st.rerun()
-                    except RuntimeError as e: st.error(str(e))
+                    except RuntimeError: st.error("操作失败，请稍后重试。")
 
             # ---- 6. 全局徽章配置 ----
             st.divider(); st.markdown("### 6. 全局徽章配置与 AI 生成")
@@ -2178,7 +2247,7 @@ def main():
                                 icon_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=256&height=256&nologo=true&seed={seed}"
                                 db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (b_name, b_type, b_val, icon_url))
                                 db.commit(); st.cache_data.clear(); st.success(f"徽章「{html.escape(b_name)}」已生成！"); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
+                            except RuntimeError: st.error("操作失败，请稍后重试。")
                 st.markdown("**当前全局已配置的徽章：**")
                 try: existing_badges = get_badge_configs()
                 except: existing_badges = []
@@ -2214,7 +2283,7 @@ def main():
                                     placeholders = ",".join(["?"] * len(selected_badge_ids))
                                     db.execute(f"DELETE FROM config_badges WHERE id IN ({placeholders})", (*selected_badge_ids,))
                                     db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception as e: db.rollback(); db.end(); st.error(f"删除失败：{e}")
+                                except Exception: db.rollback(); db.end(); st.error("删除失败，请稍后重试。")
                         else: st.caption("请勾选徽章以进行删除操作。")
                 else: st.caption("暂无全局徽章。")
             else: st.info("全局徽章由管理员配置。")
@@ -2256,7 +2325,7 @@ def main():
                                 with st.expander("操作"):
                                     if st.button("→ 管理员", key=f"set_admin_{uname}", **_stretch({})):
                                         try: db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError as e: st.error(str(e))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                     if st.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host"), **_stretch({})):
                                         try:
                                             blocked = False
@@ -2267,7 +2336,7 @@ def main():
                                                     bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
                                                     if bound_count > 0: st.session_state[f"confirm_demote_{uname}"] = 'host'; st.rerun()
                                                 if urole != "host": db.execute("UPDATE users SET role='host' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError as e: st.error(str(e))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                     if st.button("→ 普通用户", key=f"set_user_{uname}", disabled=(urole == "user"), **_stretch({})):
                                         try:
                                             blocked = False
@@ -2278,22 +2347,22 @@ def main():
                                                     bound_count = db.execute("SELECT COUNT(*) as c FROM users WHERE host_id=?", (uname,)).fetchone()["c"]
                                                     if bound_count > 0: st.session_state[f"confirm_demote_{uname}"] = 'user'; st.rerun()
                                                 if urole != "host": db.execute("UPDATE users SET role='user' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError as e: st.error(str(e))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                     if st.button("→ 独立用户", key=f"set_solo_{uname}", disabled=(urole == "solo"), **_stretch({})):
                                         try:
                                             db.execute("UPDATE users SET role='solo' WHERE username=?", (uname,))
                                             db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError as e: st.error(str(e))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                     
                                     if st.button("⭐ 设为永久", key=f"set_perm_{uname}", disabled=is_perm, **_stretch({})):
                                         try:
                                             db.execute("UPDATE users SET plan_expires_at='2099-12-31 23:59:59' WHERE username=?", (uname,))
                                             db.commit(); st.cache_data.clear(); st.success("已设为永久！"); st.rerun()
-                                        except RuntimeError as e: st.error(str(e))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                     
                                     if st.button("重置密码", key=f"reset_{uname}", **_stretch({})):
                                         try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname)); db.commit(); st.success(f"密码已重置")
-                                        except RuntimeError as e: st.error(str(e))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                                     bind_val = st.text_input("绑定到 host", value=uhost or "", key=f"bind_val_{uname}", label_visibility="collapsed", placeholder="输入 host 用户名")
                                     if st.button("保存绑定", key=f"save_bind_{uname}", **_stretch({})):
                                         target = (bind_val or "").strip()
@@ -2313,10 +2382,10 @@ def main():
                                                         cur = dict(c_row).get("host_id") if c_row else None
                                                     if cyclic: st.error("检测到循环绑定")
                                                     else: db.execute("UPDATE users SET host_id=? WHERE username=?", (target, uname)); db.commit(); st.cache_data.clear(); st.success(f"已绑定"); st.rerun()
-                                            except RuntimeError as e: st.error(str(e))
+                                            except RuntimeError: st.error("操作失败，请稍后重试。")
                                     if st.button("解绑", key=f"unbind_{uname}", disabled=(not uhost), **_stretch({})):
                                         try: db.execute("UPDATE users SET host_id=NULL WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.success("已解绑"); st.rerun()
-                                        except RuntimeError as e: st.error(str(e))
+                                        except RuntimeError: st.error("操作失败，请稍后重试。")
                     st.divider()
                 if st.session_state[edit_user_key]:
                     if selected_usernames:
@@ -2327,7 +2396,7 @@ def main():
                                 try:
                                     for u in selected_usernames: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), u))
                                     db.commit(); st.success("批量重置成功！")
-                                except Exception as e: st.error(str(e))
+                                except Exception: st.error("操作失败，请稍后重试。")
                         with ac2:
                             if st.button("🗑 彻底删除选中用户", key="batch_del_users", **_stretch({"type": "primary"})): st.session_state["confirm_batch_del_users"] = True
                         if st.session_state.get("confirm_batch_del_users"):
@@ -2345,7 +2414,7 @@ def main():
                                             col = "username" if tbl == "users" else "owner_id"
                                             db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
                                     db.commit(); db.end(); st.session_state.pop("confirm_batch_del_users", None); st.cache_data.clear(); st.success("用户已彻底删除！"); st.rerun()
-                                except Exception as e: db.rollback(); db.end(); st.error(f"删除失败：{str(e)}")
+                                except Exception: db.rollback(); db.end(); st.error("删除失败，请稍后重试。")
                             if c2.button("取消删除", key="cancel_del_btn"): st.session_state.pop("confirm_batch_del_users", None); st.rerun()
                     else: st.caption("请勾选用户以进行批量重置密码或删除操作。")
                 for uname in [u["username"] for u in all_users_data]:
@@ -2360,7 +2429,7 @@ def main():
                                 db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
                                 db.execute("UPDATE users SET role=? WHERE username=?", (target_role, uname))
                                 db.commit(); del st.session_state[f"confirm_demote_{uname}"]; st.cache_data.clear(); st.rerun()
-                            except RuntimeError as e: st.error(str(e))
+                            except RuntimeError: st.error("操作失败，请稍后重试。")
                         if cc2.button("取消", key=f"cancel_demote_{uname}", **_stretch({})):
                             del st.session_state[f"confirm_demote_{uname}"]; st.rerun()
 
@@ -2373,8 +2442,8 @@ def main():
                             db.commit()
                             st.success("生成成功！")
                             st.code(new_code, language="text")
-                        except RuntimeError as e:
-                            st.error(f"生成失败：{e}")
+                        except RuntimeError:
+                            st.error("生成失败，请稍后重试。")
 
 if __name__ == "__main__":
     main()
