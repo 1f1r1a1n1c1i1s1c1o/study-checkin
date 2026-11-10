@@ -26,6 +26,151 @@ else:
         class OperationalError(Exception): pass
     psycopg2 = DummyPsycopg2()
 
+# ================= 多语言 =================
+LANG_PACKS = {
+    "zh": {
+        "language": "语言 / Language",
+        "app_title": "学习打卡系统",
+        "login": "登录", "register": "注册", "find_pwd": "找回密码",
+        "username": "用户名", "password": "密码",
+        "set_username": "设置用户名", "set_pwd": "设置密码", "confirm_pwd": "确认密码",
+        "security_q": "密保问题 (如：我的幸运数字？)", "security_a": "密保答案",
+        "login_btn": "登录", "register_btn": "注册", "reset_btn": "确认重置密码",
+        "wrong_creds": "用户名或密码错误", "fill_all": "请填写所有字段（含密保）",
+        "pwd_mismatch": "密码不一致", "reserved_name": "该用户名为系统保留，请换一个",
+        "user_exists": "用户名已存在", "register_ok": "注册成功！已为您分配 3 天内测体验。请去登录。",
+        "no_security_q": "该账户未设置密保问题，请联系管理员重置密码。",
+        "user_not_exist": "该用户名不存在", "reset_ok": "密码重置成功！请去登录。",
+        "wrong_answer": "密保答案错误！",
+        "reset_intro": "输入用户名，验证密保问题后重设密码。",
+        "input_username": "请输入你的用户名", "new_password": "新密码",
+        "sidebar_title": "学习打卡", "mobile_mode": "📱 手机精简模式",
+        "current_identity": "当前身份", "local_time": "当地时间",
+        "makeup_cards": "🎫 补签卡", "available_points": "当前可用积分",
+        "timer": "专注计时器 (番茄钟)", "badges": "我的成就徽章",
+        "no_badges": "暂无徽章。", "points_detail": "积分明细",
+        "checkin_pts": "打卡", "longterm_pts": "长期", "exam_pts": "考试",
+        "extra_pts": "偶发", "special_pts": "特殊", "spent_pts": "消耗",
+        "account_settings": "账号与数据设置", "timezone": "时区设置",
+        "select_timezone": "所在地区/时区", "custom_tz": "自定义时区",
+        "tz_offset": "输入 UTC 偏移小时数", "save_tz": "保存时区设置",
+        "new_username": "新用户名", "leave_blank": "留空则不修改",
+        "change_username": "确认修改用户名", "change_pwd": "确认修改密码",
+        "change_security": "修改密保", "new_security_q": "新密保问题",
+        "new_security_a": "新密保答案", "save_security": "保存密保",
+        "webhook": "防遗忘提醒 Webhook", "save_webhook": "保存 Webhook",
+        "export_data": "📥 导出我的数据 (JSON)", "logout_btn": "退出登录",
+        "select_child": "选择你要管理/查看的孩子",
+        "admin_select_target": "管理员特权：选择操作对象",
+        "penetrate": "穿透管理", "no_children_bound": "暂无绑定的孩子，请联系管理员绑定。",
+        "role_admin": "管理员", "role_host": "家长", "role_user": "孩子", "role_solo": "独立用户",
+        "remaining": "剩余", "permanent": "永久", "expired": "已过期",
+        "tab_checkin": "打卡", "tab_extra": "偶发", "tab_history": "历史与图表",
+        "tab_shop": "商城", "tab_redeem": "兑换", "tab_exam": "考试",
+        "tab_event": "事件", "tab_settings": "系统设置", "tab_leaderboard": "排行榜",
+        "no_tasks_today": "今日还没有配置任务哦，请去【系统设置】里添加！",
+        "basic_req": "基本要求", "full_req": "满分",
+        "today_done": "今日已完成打卡，记录已锁定。",
+        "undo_checkin": "撤销今日打卡（重新填写）",
+        "base_score": "基础分", "today_total": "今日总分",
+        "est_total": "预计总分", "save_checkin": "保存今日打卡",
+        "saved": "已保存！", "bonus": "Bonus",
+        "shop_empty": "商城空！", "redeem_btn": "兑换",
+        "confirm_deduct": "确认扣除", "points_insufficient": "积分不足，兑换失败。",
+        "redeem_ok": "兑换成功！", "redeem_history": "兑换历史", "none_yet": "暂无",
+        "leaderboard_title": "🏆 兄弟姐妹排行榜",
+        "period": "周期", "daily_board": "日榜", "monthly_board": "月榜", "total_board": "总榜",
+        "score_col": "分", "no_rank_data": "暂无排行数据",
+        "you": "(你)", "only_you": "暂无其他兄弟姐妹参与排行，邀请他们一起来比拼吧！",
+    },
+    "en": {
+        "language": "Language / 语言",
+        "app_title": "Study Check-in",
+        "login": "Login", "register": "Register", "find_pwd": "Reset Password",
+        "username": "Username", "password": "Password",
+        "set_username": "Username", "set_pwd": "Password", "confirm_pwd": "Confirm Password",
+        "security_q": "Security Question (e.g. My lucky number?)", "security_a": "Security Answer",
+        "login_btn": "Sign In", "register_btn": "Sign Up", "reset_btn": "Reset Password",
+        "wrong_creds": "Incorrect username or password", "fill_all": "Please fill in all fields (including security question)",
+        "pwd_mismatch": "Passwords do not match", "reserved_name": "This username is reserved. Please choose another.",
+        "user_exists": "Username already exists", "register_ok": "Registered! You have a 3-day trial. Please log in.",
+        "no_security_q": "This account has no security question. Please contact the admin.",
+        "user_not_exist": "Username does not exist", "reset_ok": "Password reset successfully! Please log in.",
+        "wrong_answer": "Security answer is incorrect!",
+        "reset_intro": "Enter username, verify security question, then set a new password.",
+        "input_username": "Enter your username", "new_password": "New Password",
+        "sidebar_title": "Study Check-in", "mobile_mode": "📱 Mobile Mode",
+        "current_identity": "Signed in as", "local_time": "Local time",
+        "makeup_cards": "🎫 Makeup Cards", "available_points": "Available Points",
+        "timer": "Focus Timer (Pomodoro)", "badges": "My Badges",
+        "no_badges": "No badges yet.", "points_detail": "Points Detail",
+        "checkin_pts": "Check-in", "longterm_pts": "Long-term", "exam_pts": "Exam",
+        "extra_pts": "Extra", "special_pts": "Special", "spent_pts": "Spent",
+        "account_settings": "Account & Data", "timezone": "Timezone",
+        "select_timezone": "Region / Timezone", "custom_tz": "Custom",
+        "tz_offset": "Enter UTC offset (hours)", "save_tz": "Save Timezone",
+        "new_username": "New Username", "leave_blank": "Leave blank to keep current",
+        "change_username": "Change Username", "change_pwd": "Change Password",
+        "change_security": "Change Security", "new_security_q": "New Security Question",
+        "new_security_a": "New Security Answer", "save_security": "Save Security",
+        "webhook": "Reminder Webhook", "save_webhook": "Save Webhook",
+        "export_data": "📥 Export My Data (JSON)", "logout_btn": "Log Out",
+        "select_child": "Select a child to manage/view",
+        "admin_select_target": "Admin: Select Target User",
+        "penetrate": "Drill-down", "no_children_bound": "No child bound. Please contact admin.",
+        "role_admin": "Admin", "role_host": "Parent", "role_user": "Child", "role_solo": "Solo",
+        "remaining": "Remaining", "permanent": "Lifetime", "expired": "Expired",
+        "tab_checkin": "Check-in", "tab_extra": "Extra", "tab_history": "History",
+        "tab_shop": "Shop", "tab_redeem": "Redeem", "tab_exam": "Exam",
+        "tab_event": "Event", "tab_settings": "Settings", "tab_leaderboard": "Leaderboard",
+        "no_tasks_today": "No tasks configured for today. Please add them in Settings.",
+        "basic_req": "Basic requirement", "full_req": "Full mark",
+        "today_done": "Today's check-in is done and locked.",
+        "undo_checkin": "Undo today's check-in (re-enter)",
+        "base_score": "Base Score", "today_total": "Today Total",
+        "est_total": "Estimated Total", "save_checkin": "Save Check-in",
+        "saved": "Saved!", "bonus": "Bonus",
+        "shop_empty": "Shop is empty.", "redeem_btn": "Redeem",
+        "confirm_deduct": "Confirm Deduct", "points_insufficient": "Not enough points.",
+        "redeem_ok": "Redeemed!", "redeem_history": "Redemption History", "none_yet": "None",
+        "leaderboard_title": "🏆 Sibling Leaderboard",
+        "period": "Period", "daily_board": "Daily", "monthly_board": "Monthly", "total_board": "All-time",
+        "score_col": "pts", "no_rank_data": "No leaderboard data yet",
+        "you": "(you)", "only_you": "No other siblings yet. Invite them to compete!",
+    },
+}
+
+def detect_system_language():
+    try:
+        accept = st.context.headers.get("Accept-Language", "") or ""
+        first = accept.split(",")[0].strip().lower()
+        if first.startswith("zh"): return "zh"
+        if first.startswith("en"): return "en"
+    except Exception:
+        pass
+    return "zh"
+
+def get_lang():
+    if "lang" not in st.session_state:
+        st.session_state["lang"] = detect_system_language()
+    return st.session_state["lang"]
+
+def t(key):
+    pack = LANG_PACKS.get(get_lang(), LANG_PACKS["zh"])
+    return pack.get(key, LANG_PACKS["zh"].get(key, key))
+
+def render_language_selector(key_suffix=""):
+    options = list(LANG_PACKS.keys())
+    labels = {"zh": "中文", "en": "English"}
+    cur = get_lang()
+    idx = options.index(cur) if cur in options else 0
+    choice = st.selectbox(t("language"), options, index=idx,
+                          format_func=lambda x: labels[x], key=f"lang_sel_{key_suffix}")
+    if choice != st.session_state.get("lang"):
+        st.session_state["lang"] = choice
+        return True
+    return False
+
 # ================= 密码与安全区 =================
 SECRET_KEY = "study-checkin-super-secret-salt-v1"
 
@@ -280,7 +425,7 @@ def init_db(db):
         except Exception as e: print(f"清理历史约束失败: {e}")
 
     tables_common = [
-        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT, plan_expires_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT, plan_expires_at TEXT, language TEXT)",
         "CREATE TABLE IF NOT EXISTS redeem_codes (code TEXT PRIMARY KEY, days INTEGER, is_used INTEGER DEFAULT 0, used_by TEXT, created_at TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
         "CREATE TABLE IF NOT EXISTS period_bonus (period_key TEXT, owner_id TEXT, kind TEXT, points REAL, ts TEXT)",
@@ -291,8 +436,8 @@ def init_db(db):
         "CREATE TABLE IF NOT EXISTS config_bonus_rules (owner_id TEXT PRIMARY KEY, rules_json TEXT)",
         "CREATE TABLE IF NOT EXISTS config_exam_multihit (hit_count INTEGER, owner_id TEXT, points REAL)",
     ]
-    for t in tables_common:
-        try: db.execute(t)
+    for t_sql in tables_common:
+        try: db.execute(t_sql)
         except: pass
 
     pk_expr = "SERIAL PRIMARY KEY" if db.is_cloud else "INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -323,7 +468,7 @@ def init_db(db):
 
     if db.is_cloud:
         for q in [
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'", "ALTER TABLE users ADD COLUMN IF NOT EXISTS webhook_url TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS makeup_cards INTEGER DEFAULT 0", "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone_offset REAL DEFAULT 8.0", "ALTER TABLE users ADD COLUMN IF NOT EXISTS host_id TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_expires_at TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'", "ALTER TABLE users ADD COLUMN IF NOT EXISTS webhook_url TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS makeup_cards INTEGER DEFAULT 0", "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone_offset REAL DEFAULT 8.0", "ALTER TABLE users ADD COLUMN IF NOT EXISTS host_id TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_expires_at TEXT", "ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT",
             "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'", "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS basic_thr REAL", "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS full_thr REAL",
             "ALTER TABLE period_bonus ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE redemptions ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'", "ALTER TABLE exam_rewards ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'", "ALTER TABLE special_events ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'", "ALTER TABLE extra_points ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
@@ -334,7 +479,7 @@ def init_db(db):
         db.commit()
     else:
         for q in [
-            "ALTER TABLE users ADD COLUMN security_question TEXT", "ALTER TABLE users ADD COLUMN security_answer TEXT", "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'", "ALTER TABLE users ADD COLUMN webhook_url TEXT", "ALTER TABLE users ADD COLUMN makeup_cards INTEGER DEFAULT 0", "ALTER TABLE users ADD COLUMN timezone_offset REAL DEFAULT 8.0", "ALTER TABLE users ADD COLUMN host_id TEXT", "ALTER TABLE users ADD COLUMN plan_expires_at TEXT",
+            "ALTER TABLE users ADD COLUMN security_question TEXT", "ALTER TABLE users ADD COLUMN security_answer TEXT", "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'", "ALTER TABLE users ADD COLUMN webhook_url TEXT", "ALTER TABLE users ADD COLUMN makeup_cards INTEGER DEFAULT 0", "ALTER TABLE users ADD COLUMN timezone_offset REAL DEFAULT 8.0", "ALTER TABLE users ADD COLUMN host_id TEXT", "ALTER TABLE users ADD COLUMN plan_expires_at TEXT", "ALTER TABLE users ADD COLUMN language TEXT",
             "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'", "ALTER TABLE daily_records ADD COLUMN basic_thr REAL", "ALTER TABLE daily_records ADD COLUMN full_thr REAL",
             "ALTER TABLE period_bonus ADD COLUMN owner_id TEXT DEFAULT '晴'",
             "ALTER TABLE redemptions ADD COLUMN owner_id TEXT DEFAULT '晴'", "ALTER TABLE exam_rewards ADD COLUMN owner_id TEXT DEFAULT '晴'", "ALTER TABLE special_events ADD COLUMN owner_id TEXT DEFAULT '晴'", "ALTER TABLE extra_points ADD COLUMN owner_id TEXT DEFAULT '晴'",
@@ -344,7 +489,6 @@ def init_db(db):
             except: pass
         db.commit()
 
-    # 补发老用户试用期
     try:
         expire_date = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
         db.execute("UPDATE users SET plan_expires_at=? WHERE plan_expires_at IS NULL AND role IN ('user', 'solo')", (expire_date,))
@@ -398,9 +542,9 @@ def init_old_admin_data(db, owner_id):
     DEFAULT_EXAM_CONFIG = {"语文": {"type": "score", "max_score": 150, "target": 105.0, "step": 3.0, "step_points": 2.0}}
     
     for i in range(7):
-        for t in BASE_TASKS:
-            task_id = f"{owner_id}_{t[0]}_d{i}"
-            try: db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (task_id, i, owner_id, t[1], t[2], t[3]))
+        for task in BASE_TASKS:
+            task_id = f"{owner_id}_{task[0]}_d{i}"
+            try: db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (task_id, i, owner_id, task[1], task[2], task[3]))
             except Exception as e: print(f"插入任务失败: {e}")
         try: db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', (i, owner_id, 8.0, 11.0))
         except Exception as e: print(f"插入阈值失败: {e}")
@@ -501,6 +645,57 @@ def get_balance(oid) -> dict:
     except: data = {"daily": 0.0, "period": 0.0, "exam": 0.0, "special": 0.0, "spent": 0.0, "extra": 0.0}
     daily, period, exam, special, spent, extra = [round(data[k], 2) for k in ["daily", "period", "exam", "special", "spent", "extra"]]
     return {"daily": daily, "period": period, "exam": exam, "special": special, "spent": spent, "extra": extra, "balance": round(daily + period + exam + special + extra - spent, 2)}
+
+# ================= 排行榜 =================
+def get_leaderboard(children, period, tz_offset):
+    if not children:
+        return []
+    now = get_user_now(tz_offset)
+    today = now.date()
+    if period == "day":
+        start = today.isoformat()
+    elif period == "month":
+        start = today.replace(day=1).isoformat()
+    else:
+        start = None
+
+    db = get_db()
+    scores = {c: 0.0 for c in children}
+    placeholders = ",".join(["?"] * len(children))
+    try:
+        if start is None:
+            rows = db.execute(
+                f"SELECT owner_id, SUM(total_score) as s FROM daily_records WHERE owner_id IN ({placeholders}) GROUP BY owner_id",
+                (*children,)
+            ).fetchall()
+        else:
+            rows = db.execute(
+                f"SELECT owner_id, SUM(total_score) as s FROM daily_records WHERE owner_id IN ({placeholders}) AND day >= ? GROUP BY owner_id",
+                (*children, start)
+            ).fetchall()
+        for r in rows:
+            if r["owner_id"] in scores:
+                scores[r["owner_id"]] += float(r["s"] or 0)
+
+        for tbl in ["period_bonus", "exam_rewards", "special_events", "extra_points"]:
+            if start is None:
+                rows = db.execute(
+                    f"SELECT owner_id, SUM(points) as s FROM {tbl} WHERE owner_id IN ({placeholders}) GROUP BY owner_id",
+                    (*children,)
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    f"SELECT owner_id, SUM(points) as s FROM {tbl} WHERE owner_id IN ({placeholders}) AND substr(ts, 1, 10) >= ? GROUP BY owner_id",
+                    (*children, start)
+                ).fetchall()
+            for r in rows:
+                if r["owner_id"] in scores:
+                    scores[r["owner_id"]] += float(r["s"] or 0)
+    except Exception as e:
+        print(f"leaderboard query failed: {e}")
+
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+    return [{"username": u, "score": round(s, 2), "rank": i + 1} for i, (u, s) in enumerate(ranked)]
 
 @st.cache_data(ttl=10, show_spinner=False)
 def get_makeup_cards_of(username):
@@ -666,7 +861,7 @@ def settle_longterm_bonus(db, oid, ts):
 
 def save_day(db, day: date, done_ids: list, oid: str, ts: str):
     tasks = get_tasks(day.weekday(), oid)
-    base = sum(t["points"] for t in tasks if t["id"] in set(done_ids))
+    base = sum(task["points"] for task in tasks if task["id"] in set(done_ids))
     thresholds = get_thresholds(oid); thr = thresholds.get(day.weekday(), {"basic": 0, "full": 0})
     
     existing = db.execute("SELECT day FROM daily_records WHERE day=? AND owner_id=?", (day.isoformat(), oid)).fetchone()
@@ -767,16 +962,17 @@ def render_timer():
         components.html(timer_html, height=220)
 
 def login_page(db):
-    st.title("学习打卡系统")
+    st.title(t("app_title"))
+    render_language_selector("login_top")
     if "login_page_uid" not in st.session_state: st.session_state.login_page_uid = secrets.token_hex(4)
     uid = st.session_state.login_page_uid
-    tab1, tab2, tab3 = st.tabs(["登录", "注册", "找回密码"])
+    tab1, tab2, tab3 = st.tabs([t("login"), t("register"), t("find_pwd")])
 
     with tab1:
         with st.form(f"login_form_{uid}"):
-            u = st.text_input("用户名", max_chars=20)
-            p = st.text_input("密码", type="password", max_chars=72)
-            if _submit("登录", **_stretch({"type": "primary"})):
+            u = st.text_input(t("username"), max_chars=20)
+            p = st.text_input(t("password"), type="password", max_chars=72)
+            if _submit(t("login_btn"), **_stretch({"type": "primary"})):
                 try:
                     user = db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
                     if user:
@@ -790,60 +986,62 @@ def login_page(db):
                             if check_pwd_bcrypt(p, stored_hash): is_valid = True
                         if is_valid:
                             st.session_state.user = u; st.session_state.role = user["role"]
+                            if user.get("language") in LANG_PACKS:
+                                st.session_state["lang"] = user["language"]
                             st.query_params["user"] = u
                             st.query_params["auth"] = generate_auth_token(u, stored_hash)
                             if p == "123456": st.session_state.force_pwd_change = True
                             st.rerun()
-                        else: st.error("用户名或密码错误")
-                    else: st.error("用户名或密码错误")
+                        else: st.error(t("wrong_creds"))
+                    else: st.error(t("wrong_creds"))
                 except RuntimeError as e: st.error(str(e))
 
     with tab2:
         with st.form(f"reg_form_{uid}"):
-            u = st.text_input("设置用户名", max_chars=20)
-            p = st.text_input("设置密码", type="password", max_chars=72)
-            p2 = st.text_input("确认密码", type="password", max_chars=72)
-            sq = st.text_input("密保问题 (如：我的幸运数字？)", max_chars=50)
-            sa = st.text_input("密保答案", max_chars=50)
-            if _submit("注册", **_stretch({"type": "primary"})):
-                if not u or not p or not sq or not sa: st.error("请填写所有字段（含密保）")
-                elif p != p2: st.error("密码不一致")
-                elif u.lower() in ["system", "admin"]: st.error("该用户名为系统保留，请换一个")
+            u = st.text_input(t("set_username"), max_chars=20)
+            p = st.text_input(t("set_pwd"), type="password", max_chars=72)
+            p2 = st.text_input(t("confirm_pwd"), type="password", max_chars=72)
+            sq = st.text_input(t("security_q"), max_chars=50)
+            sa = st.text_input(t("security_a"), max_chars=50)
+            if _submit(t("register_btn"), **_stretch({"type": "primary"})):
+                if not u or not p or not sq or not sa: st.error(t("fill_all"))
+                elif p != p2: st.error(t("pwd_mismatch"))
+                elif u.lower() in ["system", "admin"]: st.error(t("reserved_name"))
                 else:
                     try:
-                        if db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error("用户名已存在")
+                        if db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error(t("user_exists"))
                         else:
                             trial_exp = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
-                            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer, plan_expires_at) VALUES (?, ?, 'user', ?, ?, ?)",
-                                (u, hash_pwd_bcrypt(p), sq, hash_pwd_sha256(sa.strip().lower()), trial_exp))
+                            db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer, plan_expires_at, language) VALUES (?, ?, 'user', ?, ?, ?, ?)",
+                                (u, hash_pwd_bcrypt(p), sq, hash_pwd_sha256(sa.strip().lower()), trial_exp, get_lang()))
                             db.commit()
                             try: init_old_admin_data(db, u)
                             except Exception as e: print(f"初始化新用户默认配置失败（静默处理）: {e}")
-                            st.cache_data.clear(); st.success("注册成功！已为您分配 3 天内测体验。请去登录。")
+                            st.cache_data.clear(); st.success(t("register_ok"))
                     except RuntimeError as e: st.error(str(e))
 
     with tab3:
-        st.write("输入用户名，验证密保问题后重设密码。")
-        u_reset = st.text_input("请输入你的用户名", key=f"reset_u_{uid}", max_chars=20)
+        st.write(t("reset_intro"))
+        u_reset = st.text_input(t("input_username"), key=f"reset_u_{uid}", max_chars=20)
         if u_reset:
             try:
                 user = db.execute("SELECT * FROM users WHERE username=?", (u_reset,)).fetchone()
                 if user:
                     sq = user.get("security_question")
-                    if not sq: st.warning("该账户未设置密保问题，请联系管理员重置密码。")
+                    if not sq: st.warning(t("no_security_q"))
                     else:
                         with st.form(f"reset_form_{uid}"):
-                            st.info(f"密保问题：{html.escape(sq)}")
-                            ans = st.text_input("密保答案", max_chars=50)
-                            new_p = st.text_input("新密码", type="password", max_chars=72)
-                            if _submit("确认重置密码", **_stretch({"type": "primary"})):
-                                if not ans or not new_p: st.error("请填写完整")
+                            st.info(f"{t('security_q')}: {html.escape(sq)}")
+                            ans = st.text_input(t("security_a"), max_chars=50)
+                            new_p = st.text_input(t("new_password"), type="password", max_chars=72)
+                            if _submit(t("reset_btn"), **_stretch({"type": "primary"})):
+                                if not ans or not new_p: st.error(t("fill_all"))
                                 elif hash_pwd_sha256(ans.strip().lower()) == user["security_answer"]:
                                     new_hash = hash_pwd_bcrypt(new_p)
                                     db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, u_reset))
-                                    db.commit(); st.success("密码重置成功！请去登录。")
-                                else: st.error("密保答案错误！")
-                else: st.error("该用户名不存在")
+                                    db.commit(); st.success(t("reset_ok"))
+                                else: st.error(t("wrong_answer"))
+                else: st.error(t("user_not_exist"))
             except RuntimeError as e: st.error(str(e))
 
 def main():
@@ -863,6 +1061,8 @@ def main():
                 if row and verify_auth_token(param_user, param_auth, row["password_hash"]):
                     st.session_state.user = row["username"]
                     st.session_state.role = row["role"]
+                    if row.get("language") in LANG_PACKS:
+                        st.session_state["lang"] = row["language"]
                     if check_pwd_bcrypt("123456", row["password_hash"]): st.session_state.force_pwd_change = True
                 else:
                     st.query_params.clear(); login_page(db); return
@@ -882,12 +1082,12 @@ def main():
         st.title("⚠️ 安全提示：请修改默认密码")
         st.warning("检测到您正在使用系统默认密码 (123456)，为了您的数据安全，请立即修改后才能继续使用。")
         with st.form("force_pwd_form"):
-            new_p = st.text_input("新密码", type="password", max_chars=72)
-            confirm_p = st.text_input("确认新密码", type="password", max_chars=72)
+            new_p = st.text_input(t("new_password"), type="password", max_chars=72)
+            confirm_p = st.text_input(t("confirm_pwd"), type="password", max_chars=72)
             submit = _submit("提交修改", **_stretch({"type": "primary"}))
             if submit:
-                if not new_p or not confirm_p: st.error("请填写完整")
-                elif new_p != confirm_p: st.error("两次输入的新密码不一致")
+                if not new_p or not confirm_p: st.error(t("fill_all"))
+                elif new_p != confirm_p: st.error(t("pwd_mismatch"))
                 elif len(new_p) < 6: st.error("新密码长度不能少于 6 位")
                 elif new_p == "123456": st.error("新密码不能与默认密码相同")
                 else:
@@ -923,8 +1123,15 @@ def main():
     except: pass
 
     with st.sidebar:
-        st.title("学习打卡")
-        is_mobile_mode = st.checkbox("📱 手机精简模式", value=False)
+        st.title(t("sidebar_title"))
+        render_language_selector("sidebar")
+        if st.session_state.get("lang") and user_row.get("language") != st.session_state["lang"]:
+            try:
+                db.execute("UPDATE users SET language=? WHERE username=?", (st.session_state["lang"], current_user))
+                db.commit()
+            except Exception:
+                pass
+        is_mobile_mode = st.checkbox(t("mobile_mode"), value=False)
         bal = {"balance": 0, "daily": 0, "period": 0, "exam": 0, "special": 0, "spent": 0, "extra": 0}
 
         view_as = current_user; view_role = current_role
@@ -934,8 +1141,8 @@ def main():
                 children = db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()
                 child_names = [r["username"] for r in children]
             except: child_names = []
-            if not child_names: view_as = None; st.warning("暂无绑定的孩子，请联系管理员绑定。")
-            else: view_as = st.selectbox("选择你要管理/查看的孩子", child_names, index=0); view_role = "user"
+            if not child_names: view_as = None; st.warning(t("no_children_bound"))
+            else: view_as = st.selectbox(t("select_child"), child_names, index=0); view_role = "user"
         elif current_role == "solo":
             view_as = current_user
             view_role = "solo"
@@ -944,7 +1151,7 @@ def main():
             except: all_users = []
             user_list = [u["username"] for u in all_users]
             if current_user in user_list: user_list.remove(current_user); user_list.insert(0, current_user)
-            selected_target = st.selectbox("管理员特权：选择操作对象", user_list, index=0)
+            selected_target = st.selectbox(t("admin_select_target"), user_list, index=0)
             try:
                 target_role_row = db.execute("SELECT role FROM users WHERE username=?", (selected_target,)).fetchone()
                 target_role = target_role_row["role"] if target_role_row else "user"
@@ -955,7 +1162,7 @@ def main():
                     child_names = [r["username"] for r in children]
                 except: child_names = []
                 if child_names:
-                    selected_child = st.selectbox(f"穿透管理：{selected_target} 名下的孩子", child_names, index=0)
+                    selected_child = st.selectbox(f"{t('penetrate')}: {selected_target}", child_names, index=0)
                     view_as = selected_child; view_role = "user"
                 else:
                     st.caption("该家长名下暂无孩子，当前配置的是家长本人")
@@ -972,25 +1179,25 @@ def main():
             
             view_today = get_user_today(target_tz)
             view_makeup_sidebar = get_makeup_cards_of(view_as)
-            role_display = {"admin": "管理员", "host": "家长", "user": "孩子", "solo": "独立用户"}.get(view_role, view_role)
+            role_display = {"admin": t("role_admin"), "host": t("role_host"), "user": t("role_user"), "solo": t("role_solo")}.get(view_role, view_role)
             
             plan_exp_str = ""
             if view_role in ["user", "solo", "admin"]:
                 rem_days = get_remaining_days(plan_exp)
-                if rem_days == 9999: plan_exp_str = "\n\n⏳ 剩余：永久"
-                elif rem_days < 0: plan_exp_str = "\n\n⚠️ 已过期"
-                else: plan_exp_str = f"\n\n⏳ 剩余：{rem_days} 天"
+                if rem_days == 9999: plan_exp_str = f"\n\n⏳ {t('remaining')}: {t('permanent')}"
+                elif rem_days < 0: plan_exp_str = f"\n\n⚠️ {t('expired')}"
+                else: plan_exp_str = f"\n\n⏳ {t('remaining')}: {rem_days} 天"
             
-            st.info(f"当前身份：{html.escape(view_as)} ({role_display}){plan_exp_str}\n\n当地时间：{get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n🎫 补签卡：{view_makeup_sidebar} 张")
+            st.info(f"{t('current_identity')}: {html.escape(view_as)} ({role_display}){plan_exp_str}\n\n{t('local_time')}: {get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n{t('makeup_cards')}: {view_makeup_sidebar}")
             try: bal = get_balance(view_as)
             except: pass
-            if view_role != "host": st.metric("当前可用积分", f"{bal['balance']:.1f}")
+            if view_role != "host": st.metric(t("available_points"), f"{bal['balance']:.1f}")
         else:
-            role_display = "家长"; st.info(f"当前身份：{html.escape(current_user)} (家长)\n\n暂无绑定的孩子。")
+            st.info(f"{t('current_identity')}: {html.escape(current_user)} ({t('role_host')})\n\n{t('no_children_bound')}")
 
         if not is_mobile_mode and (view_role in ("admin", "solo") or (view_role == "host" and view_as)):
-            with st.expander("专注计时器 (番茄钟)", expanded=False): render_timer()
-            with st.expander("我的成就徽章"):
+            with st.expander(t("timer"), expanded=False): render_timer()
+            with st.expander(t("badges")):
                 try: user_badges = get_user_badges(view_as)
                 except: user_badges = []
                 if user_badges:
@@ -1002,30 +1209,30 @@ def main():
                                 with cols[j]:
                                     st.markdown(f'<div style="height:70px; display:flex; align-items:center; justify-content:center;"><img src="{b["icon"]}" width="60" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'"></div>', unsafe_allow_html=True)
                                     st.markdown(f"<div style='text-align: center; font-size: 14px;'>{b['name']}</div>", unsafe_allow_html=True)
-                else: st.caption("暂无徽章。")
-            with st.expander("积分明细"):
-                st.write(f"打卡：{bal['daily']:.1f} | 长期：{bal['period']:.1f}")
-                st.write(f"考试：{bal['exam']:.1f} | 偶发：{bal['extra']:.1f}")
-                st.write(f"特殊：{bal['special']:.1f} | 消耗：-{bal['spent']:.1f}")
+                else: st.caption(t("no_badges"))
+            with st.expander(t("points_detail")):
+                st.write(f"{t('checkin_pts')}: {bal['daily']:.1f} | {t('longterm_pts')}: {bal['period']:.1f}")
+                st.write(f"{t('exam_pts')}: {bal['exam']:.1f} | {t('extra_pts')}: {bal['extra']:.1f}")
+                st.write(f"{t('special_pts')}: {bal['special']:.1f} | {t('spent_pts')}: -{bal['spent']:.1f}")
 
             st.divider()
-            with st.expander("账号与数据设置"):
-                st.markdown("**时区设置**")
+            with st.expander(t("account_settings")):
+                st.markdown(f"**{t('timezone')}**")
                 curr_tz_name = next((k for k, v in TIMEZONES.items() if v == user_tz), "自定义时区")
-                new_tz_name = st.selectbox("所在地区/时区", list(TIMEZONES.keys()), index=list(TIMEZONES.keys()).index(curr_tz_name))
+                new_tz_name = st.selectbox(t("select_timezone"), list(TIMEZONES.keys()), index=list(TIMEZONES.keys()).index(curr_tz_name))
                 if new_tz_name == "自定义时区":
-                    custom_tz = st.number_input("输入 UTC 偏移小时数", value=float(user_tz), step=0.5, min_value=-12.0, max_value=14.0)
+                    custom_tz = st.number_input(t("tz_offset"), value=float(user_tz), step=0.5, min_value=-12.0, max_value=14.0)
                     final_tz = custom_tz
                 else: final_tz = TIMEZONES[new_tz_name]
-                if st.button("保存时区设置", **_stretch({})):
+                if st.button(t("save_tz"), **_stretch({})):
                     try: db.execute("UPDATE users SET timezone_offset=? WHERE username=?", (final_tz, current_user)); db.commit(); st.success("时区已更新！"); st.rerun()
                     except RuntimeError as e: st.error(str(e))
 
                 st.divider()
-                new_name = st.text_input("新用户名", placeholder="留空则不修改", max_chars=20)
-                if st.button("确认修改用户名", **_stretch({})):
+                new_name = st.text_input(t("new_username"), placeholder=t("leave_blank"), max_chars=20)
+                if st.button(t("change_username"), **_stretch({})):
                     if new_name and new_name != current_user:
-                        if new_name.lower() in ["system", "admin"]: st.error("该用户名为系统保留，请换一个")
+                        if new_name.lower() in ["system", "admin"]: st.error(t("reserved_name"))
                         else:
                             try:
                                 if db.execute("SELECT * FROM users WHERE username=?", (new_name,)).fetchone(): st.error("该用户名已被占用")
@@ -1047,8 +1254,8 @@ def main():
                             except RuntimeError as e: st.error(str(e))
 
                 st.divider()
-                new_pwd = st.text_input("新密码", type="password", key="new_pwd", max_chars=72)
-                if st.button("确认修改密码", **_stretch({})):
+                new_pwd = st.text_input(t("new_password"), type="password", key="new_pwd", max_chars=72)
+                if st.button(t("change_pwd"), **_stretch({})):
                     if new_pwd:
                         try:
                             new_hash = hash_pwd_bcrypt(new_pwd)
@@ -1059,10 +1266,10 @@ def main():
                         except RuntimeError as e: st.error(str(e))
 
                 st.divider()
-                st.markdown("**修改密保**")
-                new_sq = st.text_input("新密保问题", max_chars=50, key="new_sq")
-                new_sa = st.text_input("新密保答案", max_chars=50, key="new_sa")
-                if st.button("保存密保", **_stretch({})):
+                st.markdown(f"**{t('change_security')}**")
+                new_sq = st.text_input(t("new_security_q"), max_chars=50, key="new_sq")
+                new_sa = st.text_input(t("new_security_a"), max_chars=50, key="new_sa")
+                if st.button(t("save_security"), **_stretch({})):
                     if not new_sq or not new_sa: st.error("密保问题和答案不能为空")
                     else:
                         try:
@@ -1072,8 +1279,8 @@ def main():
                         except RuntimeError as e: st.error(str(e))
 
                 st.divider()
-                webhook_input = st.text_input("防遗忘提醒 Webhook", value=user_row.get("webhook_url") or "")
-                if st.button("保存 Webhook", **_stretch({})):
+                webhook_input = st.text_input(t("webhook"), value=user_row.get("webhook_url") or "")
+                if st.button(t("save_webhook"), **_stretch({})):
                     try: db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user)); db.commit(); st.success("保存成功！")
                     except RuntimeError as e: st.error(str(e))
 
@@ -1086,15 +1293,15 @@ def main():
                         "extra_points": [dict(r) for r in db.execute("SELECT * FROM extra_points WHERE owner_id=?", (current_user,)).fetchall()],
                         "special_events": [dict(r) for r in db.execute("SELECT * FROM special_events WHERE owner_id=?", (current_user,)).fetchall()]
                     }
-                    st.download_button("📥 导出我的数据 (JSON)", data=json.dumps(my_data, ensure_ascii=False, indent=2, default=str), file_name=f"backup_{current_user}.json", mime="application/json", **_stretch({}))
+                    st.download_button(t("export_data"), data=json.dumps(my_data, ensure_ascii=False, indent=2, default=str), file_name=f"backup_{current_user}.json", mime="application/json", **_stretch({}))
                 except: pass
 
         st.divider()
-        if st.button("退出登录", **_stretch({})):
+        if st.button(t("logout_btn"), **_stretch({})):
             del st.session_state.user; del st.session_state.role; st.query_params.clear(); st.rerun()
 
     if view_role == "host" and view_as is None:
-        st.info("暂无绑定的孩子，请联系管理员绑定后再使用。"); st.stop()
+        st.info(t("no_children_bound")); st.stop()
 
     # 【会员到期拦截】
     if view_role in ["user", "solo"]:
@@ -1138,73 +1345,126 @@ def main():
                         st.error(f"激活失败：{str(e)}")
             st.stop()
 
-    base_desktop = ["打卡", "偶发", "历史与图表", "商城", "兑换", "考试", "事件"]
-    base_mobile = ["打卡", "商城", "兑换"]
+    base_desktop = [t("tab_checkin"), t("tab_extra"), t("tab_history"), t("tab_shop"), t("tab_redeem"), t("tab_exam"), t("tab_event")]
+    base_mobile = [t("tab_checkin"), t("tab_shop"), t("tab_redeem")]
+    # 孩子（user）桌面/手机模式均加入排行榜
+    base_desktop_user = [t("tab_checkin"), t("tab_leaderboard"), t("tab_history"), t("tab_shop"), t("tab_redeem"), t("tab_exam"), t("tab_event")]
+    base_mobile_user = [t("tab_checkin"), t("tab_leaderboard"), t("tab_shop"), t("tab_redeem")]
+
     if current_role in ("admin", "solo"):
-        tabs = base_mobile + ["系统设置"] if is_mobile_mode else base_desktop + ["系统设置"]
-    elif current_role == "host": tabs = ["历史与图表", "偶发", "系统设置"]
-    else: tabs = base_mobile if is_mobile_mode else ["打卡", "历史与图表", "商城", "兑换", "考试", "事件"]
+        tabs = base_mobile + [t("tab_settings")] if is_mobile_mode else base_desktop + [t("tab_settings")]
+    elif current_role == "host":
+        tabs = [t("tab_history"), t("tab_leaderboard"), t("tab_extra"), t("tab_settings")]
+    else:
+        tabs = base_mobile_user if is_mobile_mode else base_desktop_user
 
     tab_objs = st.tabs(tabs)
     tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
 
     # ============ 打卡 ============
-    if "打卡" in tab_dict:
-        with tab_dict["打卡"]:
+    if t("tab_checkin") in tab_dict:
+        with tab_dict[t("tab_checkin")]:
             try: tasks = get_tasks(view_today.weekday(), view_as)
             except: tasks = []
-            if not tasks: st.warning("今日还没有配置任务哦，请去【系统设置】里添加！")
+            if not tasks: st.warning(t("no_tasks_today"))
             else:
                 try: thresholds = get_thresholds(view_as); thr = thresholds.get(view_today.weekday(), {"basic": 0, "full": 0})
                 except: thr = {"basic": 0, "full": 0}
                 st.subheader(f"{view_today.strftime('%m月%d日')} - {WEEKDAY_CN[view_today.weekday()]}")
-                st.caption(f"基本要求：{thr['basic']} 分 | 满分：{thr['full']} 分")
+                st.caption(f"{t('basic_req')}: {thr['basic']} {t('score_col')} | {t('full_req')}: {thr['full']} {t('score_col')}")
                 try: existing = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
                 except: existing = None
                 already_done = existing is not None
                 done_ids = set(json.loads(existing["done_tasks"])) if (existing and existing["done_tasks"]) else set()
                 cats = {}
-                for t in tasks: cats.setdefault(t["category"], []).append(t)
+                for task in tasks: cats.setdefault(task["category"], []).append(task)
                 selected_ids = []
                 for cat, items in cats.items():
                     st.markdown(f"**{html.escape(cat)}**")
                     if is_mobile_mode:
-                        for t in items:
-                            if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{t['id']}", disabled=already_done):
-                                if not already_done: selected_ids.append(t["id"])
+                        for task in items:
+                            if st.checkbox(f"{html.escape(task['name'])} ({task['points']}{t('score_col')})", value=(task["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{task['id']}", disabled=already_done):
+                                if not already_done: selected_ids.append(task["id"])
                     else:
                         cols = st.columns(2)
-                        for i, t in enumerate(items):
+                        for i, task in enumerate(items):
                             with cols[i % 2]:
-                                if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", value=(t["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{t['id']}", disabled=already_done):
-                                    if not already_done: selected_ids.append(t["id"])
+                                if st.checkbox(f"{html.escape(task['name'])} ({task['points']}{t('score_col')})", value=(task["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{task['id']}", disabled=already_done):
+                                    if not already_done: selected_ids.append(task["id"])
                 st.divider()
                 c1, c2, c3 = st.columns(3)
                 if already_done:
-                    c1.metric("基础分", f"{float(existing['base_score'] or 0):.1f}"); c2.metric("Bonus", f"{float(existing['bonus_score'] or 0):.1f}"); c3.metric("今日总分", f"{float(existing['total_score'] or 0):.1f}")
-                    st.success("今日已完成打卡，记录已锁定。")
-                    if st.button("撤销今日打卡（重新填写）", **_stretch({"type": "secondary"})):
+                    c1.metric(t("base_score"), f"{float(existing['base_score'] or 0):.1f}"); c2.metric(t("bonus"), f"{float(existing['bonus_score'] or 0):.1f}"); c3.metric(t("today_total"), f"{float(existing['total_score'] or 0):.1f}")
+                    st.success(t("today_done"))
+                    if st.button(t("undo_checkin"), **_stretch({"type": "secondary"})):
                         try:
                             db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)); db.commit()
                             recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat())
                             st.cache_data.clear(); st.rerun()
                         except RuntimeError as e: st.error(str(e))
                 else:
-                    base_now = sum(t["points"] for t in tasks if t["id"] in set(selected_ids))
+                    base_now = sum(task["points"] for task in tasks if task["id"] in set(selected_ids))
                     try:
                         lookup = {r["day"]: {"base_score": float(r["base_score"] or 0), "basic_thr": float(r.get("basic_thr") or 0), "full_thr": float(r.get("full_thr") or 0)} for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
                         lookup[view_today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
                         bonus, detail = compute_bonus_for_day(view_today, lookup, get_bonus_rules(view_as))
                     except: bonus, detail = 0.0, {}
-                    c1.metric("基础分", f"{base_now:.1f}"); c2.metric("Bonus", f"{bonus:.1f}"); c3.metric("预计总分", f"{base_now + bonus:.1f}")
-                    if detail.get("tier") in TIER_CN: st.info(f"Bonus 判定：{TIER_CN[detail['tier']]}")
-                    if st.button("保存今日打卡", **_stretch({"type": "primary"})):
-                        try: save_day(db, view_today, selected_ids, view_as, now.isoformat()); st.success("已保存！"); st.rerun()
+                    c1.metric(t("base_score"), f"{base_now:.1f}"); c2.metric(t("bonus"), f"{bonus:.1f}"); c3.metric(t("est_total"), f"{base_now + bonus:.1f}")
+                    if detail.get("tier") in TIER_CN: st.info(f"{t('bonus')}: {TIER_CN[detail['tier']]}")
+                    if st.button(t("save_checkin"), **_stretch({"type": "primary"})):
+                        try: save_day(db, view_today, selected_ids, view_as, now.isoformat()); st.success(t("saved")); st.rerun()
                         except RuntimeError as e: st.error(str(e))
 
+    # ============ 排行榜（host + user） ============
+    if t("tab_leaderboard") in tab_dict and current_role in ("host", "user"):
+        with tab_dict[t("tab_leaderboard")]:
+            st.subheader(t("leaderboard_title"))
+            # 取要比较的孩子列表：host 直接查；user 先查自己的 host，再取该 host 名下所有孩子
+            if current_role == "host":
+                try:
+                    child_rows = db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()
+                    lb_children = [r["username"] for r in child_rows]
+                except Exception:
+                    lb_children = []
+            else:  # user
+                try:
+                    my_row = db.execute("SELECT host_id FROM users WHERE username=?", (current_user,)).fetchone()
+                    my_host = dict(my_row).get("host_id") if my_row else None
+                    if my_host:
+                        sib_rows = db.execute("SELECT username FROM users WHERE host_id=?", (my_host,)).fetchall()
+                        lb_children = [r["username"] for r in sib_rows]
+                    else:
+                        lb_children = [current_user]
+                except Exception:
+                    lb_children = [current_user]
+
+            if not lb_children:
+                st.info(t("no_rank_data"))
+            else:
+                if current_role == "user" and len(lb_children) <= 1:
+                    st.info(t("only_you"))
+                period = st.radio(
+                    t("period"),
+                    options=["day", "month", "all"],
+                    format_func=lambda x: t({"day": "daily_board", "month": "monthly_board", "all": "total_board"}[x]),
+                    horizontal=True,
+                    key=f"leaderboard_period_{current_role}",
+                )
+                board = get_leaderboard(lb_children, period, user_tz)
+                medals = ["🥇", "🥈", "🥉"]
+                max_score = max((b["score"] for b in board), default=0) or 1
+                for item in board:
+                    rank_icon = medals[item["rank"] - 1] if item["rank"] <= 3 else f"#{item['rank']}"
+                    is_me = (current_role == "user" and item["username"] == current_user)
+                    name_display = html.escape(item["username"])
+                    if is_me:
+                        name_display = f"**{name_display}** :orange[**{t('you')}**]"
+                    st.markdown(f"**{rank_icon}  {name_display}**  —  {item['score']:.1f} {t('score_col')}")
+                    st.progress(min(item["score"] / max_score, 1.0))
+
     # ============ 偶发 ============
-    if "偶发" in tab_dict:
-        with tab_dict["偶发"]:
+    if t("tab_extra") in tab_dict:
+        with tab_dict[t("tab_extra")]:
             if current_role == "user": st.warning("只有家长或管理员才能添加偶发事件哦。"); st.stop()
             st.subheader("偶发事件加/扣分")
             with st.form("extra_point_form"):
@@ -1226,12 +1486,11 @@ def main():
             else: st.caption("暂无记录")
 
     # ============ 历史与图表 ============
-    if "历史与图表" in tab_dict:
-        with tab_dict["历史与图表"]:
+    if t("tab_history") in tab_dict:
+        with tab_dict[t("tab_history")]:
             st.subheader("历史与图表分析")
             view_makeup_hist = get_makeup_cards_of(view_as)
             
-            # 先处理补签
             if current_role == "host" and view_role == "user": st.info("💡 补签请让孩子在自己的账号里操作。")
             elif view_role == "host": st.info("💡 该账号为家长，请切换选择其名下的孩子进行操作。")
             else:
@@ -1244,7 +1503,7 @@ def main():
                         past_tasks = get_tasks(sel_date.weekday(), view_as)
                         st.write(f"**请勾选你在 {sel_date.strftime('%m月%d日')} 实际完成的任务（提交后将强制算作满分）：**")
                         with st.form("makeup_form"):
-                            selected_past_ids = [t["id"] for t in past_tasks if st.checkbox(f"{html.escape(t['name'])} ({t['points']}分)", key=f"makeup_cb_{sel_date}_{t['id']}")]
+                            selected_past_ids = [task["id"] for task in past_tasks if st.checkbox(f"{html.escape(task['name'])} ({task['points']}分)", key=f"makeup_cb_{sel_date}_{task['id']}")]
                             if _submit("使用 1 张补签卡并提交", **_stretch({"type": "primary"})):
                                 db.begin()
                                 try:
@@ -1264,19 +1523,16 @@ def main():
                     else: st.info("最近 7 天全勤！")
                 else: st.info('💡 提示：商城有售「补签卡」。')
 
-            # 周报数据聚合与图片生成（普通用户、独立用户，或管理员查看自己时也显示）
             if view_role in ["user", "solo"] or (current_role == "admin" and view_as == current_user):
                 st.divider()
                 st.markdown("### 📊 专属学习周报")
                 
-                # 获取最近 7 天的记录（含今天）
                 start_date = view_today - timedelta(days=6)
                 try:
                     week_records = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? AND day >= ? AND day <= ? ORDER BY day ASC", (view_as, start_date.isoformat(), view_today.isoformat())).fetchall()
                 except:
                     week_records = []
                 
-                # 补齐 7 天数据，防止中间断档导致图表横轴缺失
                 full_week = []
                 for i in range(7):
                     d_str = (start_date + timedelta(days=i)).isoformat()
@@ -1298,53 +1554,34 @@ def main():
                     with st.spinner("正在生成精美周报..."):
                         try:
                             prop = setup_chinese_font()
-                            
-                            # 准备绘图数据
                             dates_labels = [r["day"][5:] for r in week_records]
-                            
-                            # 创建画布
                             fig, ax = plt.subplots(figsize=(10, 6), facecolor='#f8f9fa')
                             ax.set_facecolor('#f8f9fa')
-                            
-                            # 画柱状图
                             bars = ax.bar(dates_labels, scores, color='#4CAF50', width=0.5, zorder=3)
-                            
-                            # 装饰图表
                             ax.spines['top'].set_visible(False)
                             ax.spines['right'].set_visible(False)
                             ax.spines['left'].set_visible(False)
                             ax.grid(axis='y', linestyle='--', alpha=0.7, zorder=0)
                             ax.set_ylabel("每日得分", fontsize=12, fontproperties=prop)
-                            
-                            # 在柱子上标注分数
                             for bar in bars:
                                 yval = bar.get_height()
                                 if yval > 0:
                                     ax.text(bar.get_x() + bar.get_width()/2, yval + 0.1, f'{yval:.1f}', ha='center', va='bottom', fontsize=10, fontproperties=prop)
-                            
-                            # 添加顶部汇总标题
                             title_text = f"🌟 {view_as} 的专属学习周报 🌟\n"
                             summary_text = f"本周打卡：{days_count} 天 | 累计积分：{total_pts:.1f} 分 | 单日最高：{max_daily_score:.1f} 分"
-                            
                             if prop:
                                 ax.set_title(title_text, fontproperties=prop, fontsize=18, pad=20, color='#333333', fontweight='bold')
                                 fig.text(0.5, 0.88, summary_text, ha='center', fontsize=14, color='#666666', fontproperties=prop)
-                                # 确保横轴标签也有中文字体
                                 plt.xticks(fontproperties=prop)
                                 plt.yticks(fontproperties=prop)
                             else:
                                 ax.set_title(title_text, fontsize=18, pad=20, color='#333333', fontweight='bold')
                                 fig.text(0.5, 0.88, summary_text, ha='center', fontsize=14, color='#666666')
-
-                            # 调整布局
                             plt.tight_layout(rect=[0, 0, 1, 0.85])
-                            
-                            # 保存到内存
                             buf = io.BytesIO()
                             fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
                             buf.seek(0)
                             plt.close(fig)
-                            
                             st.image(buf, use_container_width=True)
                             st.download_button(
                                 label="⬇️ 点击保存图片 (发送到微信群)",
@@ -1354,7 +1591,6 @@ def main():
                                 **_stretch({"type": "secondary"})
                             )
                             st.success("图片已生成，点击上方按钮保存并发送给家长吧！")
-                            
                         except Exception as e:
                             st.error(f"生成图片失败：{e}")
 
@@ -1381,59 +1617,59 @@ def main():
                     row = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (sel, view_as)).fetchone()
                     st.write(f"**总分: {float(row['total_score'] or 0):.1f}** (基础 {float(row['base_score'] or 0):.1f} + Bonus {float(row['bonus_score'] or 0):.1f})")
                     done = json.loads(row["done_tasks"]) if row["done_tasks"] else []
-                    st.write("完成项：", ", ".join([html.escape(t["name"]) for t in get_tasks(date.fromisoformat(sel).weekday(), view_as) if t["id"] in done]) or "无")
+                    st.write("完成项：", ", ".join([html.escape(task["name"]) for task in get_tasks(date.fromisoformat(sel).weekday(), view_as) if task["id"] in done]) or "无")
                 except: pass
             else: st.info("暂无记录")
 
     # ============ 商城 ============
-    if "商城" in tab_dict:
-        with tab_dict["商城"]:
-            st.subheader("商城")
+    if t("tab_shop") in tab_dict:
+        with tab_dict[t("tab_shop")]:
+            st.subheader(t("tab_shop"))
             try: shop_items = get_shop(view_as)
             except: shop_items = []
-            if not shop_items: st.warning("商城空！")
+            if not shop_items: st.warning(t("shop_empty"))
             else:
                 try: bal = get_balance(view_as)
                 except: bal = {"balance": 0}
                 for name, cost in shop_items:
                     c1, c2, c3 = st.columns([5, 2, 2])
-                    c1.write(f"**{html.escape(name)}**"); c2.write(f"`{cost} 分`")
+                    c1.write(f"**{html.escape(name)}**"); c2.write(f"`{cost} {t('score_col')}`")
                     confirm_key = f"confirm_buy_{view_as}_{name}"
                     if st.session_state.get(confirm_key):
                         cc1, cc2 = st.columns(2)
-                        if cc1.button("确认扣除", key=f"yes_{view_as}_{name}", **_stretch({"type": "primary"})):
+                        if cc1.button(t("confirm_deduct"), key=f"yes_{view_as}_{name}", **_stretch({"type": "primary"})):
                             db.begin()
                             try:
                                 q = "SELECT (SELECT COALESCE(SUM(total_score),0) FROM daily_records WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM period_bonus WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM exam_rewards WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM special_events WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM extra_points WHERE owner_id=?)-(SELECT COALESCE(SUM(cost),0) FROM redemptions WHERE owner_id=?) AS bal"
                                 row = db.execute(q, (view_as, view_as, view_as, view_as, view_as, view_as)).fetchone()
                                 curr_bal = float(row["bal"] or 0)
                                 if curr_bal < cost:
-                                    db.end(); st.error("积分不足，兑换失败。")
+                                    db.end(); st.error(t("points_insufficient"))
                                 else:
                                     db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
                                     if name == "补签卡": db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
                                     db.commit(); db.end()
-                                    st.session_state[confirm_key] = False; st.cache_data.clear(); st.success("兑换成功！"); st.rerun()
+                                    st.session_state[confirm_key] = False; st.cache_data.clear(); st.success(t("redeem_ok")); st.rerun()
                             except Exception as e:
                                 db.rollback(); db.end(); st.error(f"兑换失败：{str(e)}")
-                        if cc2.button("取消", key=f"no_{view_as}_{name}", **_stretch({})):
+                        if cc2.button(t("cancel") if "cancel" in LANG_PACKS[get_lang()] else "取消", key=f"no_{view_as}_{name}", **_stretch({})):
                             st.session_state[confirm_key] = False; st.rerun()
                     else:
-                        if c3.button("兑换", key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost), **_stretch({})):
+                        if c3.button(t("redeem_btn"), key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost), **_stretch({})):
                             st.session_state[confirm_key] = True; st.rerun()
 
     # ============ 兑换 ============
-    if "兑换" in tab_dict:
-        with tab_dict["兑换"]:
-            st.subheader("兑换历史")
+    if t("tab_redeem") in tab_dict:
+        with tab_dict[t("tab_redeem")]:
+            st.subheader(t("redeem_history"))
             try: rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
             except: rows = []
             if rows: st.dataframe([{"时间": r["ts"], "奖励": html.escape(r["item"]), "消耗": float(r["cost"] or 0)} for r in rows], use_container_width=True)
-            else: st.info("暂无")
+            else: st.info(t("none_yet"))
 
     # ============ 考试 ============
-    if "考试" in tab_dict:
-        with tab_dict["考试"]:
+    if t("tab_exam") in tab_dict:
+        with tab_dict[t("tab_exam")]:
             st.subheader("考试专项")
             try: exam_config, _ = get_exam_config(view_as)
             except: exam_config = {}
@@ -1470,8 +1706,8 @@ def main():
                     except RuntimeError as e: st.error(str(e))
 
     # ============ 事件 ============
-    if "事件" in tab_dict:
-        with tab_dict["事件"]:
+    if t("tab_event") in tab_dict:
+        with tab_dict[t("tab_event")]:
             st.subheader("特殊事件")
             try: fired = db.execute("SELECT * FROM special_events WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
             except: fired = None
@@ -1492,10 +1728,10 @@ def main():
                     if st.button("摇一摇", **_stretch({})): st.session_state["confirm_roll"] = True; st.rerun()
 
     # ============ 系统设置 ============
-    if "系统设置" in tab_dict:
-        with tab_dict["系统设置"]:
+    if t("tab_settings") in tab_dict:
+        with tab_dict[t("tab_settings")]:
             st.subheader("系统设置")
-            role_names = {"admin": "管理员", "host": "家长", "user": "孩子", "solo": "独立用户"}
+            role_names = {"admin": t("role_admin"), "host": t("role_host"), "user": t("role_user"), "solo": t("role_solo")}
             if view_as == current_user: st.info(f"当前正在配置：**{html.escape(view_as)}**（你自己）")
             else: st.info(f"当前正在配置：**{html.escape(view_as)}**（身份：{role_names.get(view_role, view_role)}）")
 
@@ -1514,14 +1750,14 @@ def main():
 
             selected_task_ids = []
             if tasks_list:
-                for t in tasks_list:
+                for task in tasks_list:
                     if st.session_state[edit_mode_key]:
                         c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
-                        if c1.checkbox("", key=f"chk_{view_as}_{sel_wd}_{t['id']}", label_visibility="collapsed"): selected_task_ids.append(t["id"])
-                        c2.write(f"`{html.escape(str(t.get('category') or ''))}`"); c3.write(f"**{html.escape(str(t['name']))}**"); c4.write(f"{float(t['points'] or 0)} 分")
+                        if c1.checkbox("", key=f"chk_{view_as}_{sel_wd}_{task['id']}", label_visibility="collapsed"): selected_task_ids.append(task["id"])
+                        c2.write(f"`{html.escape(str(task.get('category') or ''))}`"); c3.write(f"**{html.escape(str(task['name']))}**"); c4.write(f"{float(task['points'] or 0)} 分")
                     else:
                         c1, c2, c3 = st.columns([2, 4, 2])
-                        c1.write(f"`{html.escape(str(t.get('category') or ''))}`"); c2.write(f"**{html.escape(str(t['name']))}**"); c3.write(f"{float(t['points'] or 0)} 分")
+                        c1.write(f"`{html.escape(str(task.get('category') or ''))}`"); c2.write(f"**{html.escape(str(task['name']))}**"); c3.write(f"{float(task['points'] or 0)} 分")
                 if st.session_state[edit_mode_key]:
                     st.divider()
                     if selected_task_ids:
@@ -1580,9 +1816,9 @@ def main():
                                         try:
                                             tasks_to_sync = [x for x in tasks_list if x["id"] in syncing_ids]
                                             for target_wd in target_days:
-                                                for t in tasks_to_sync:
+                                                for task in tasks_to_sync:
                                                     new_id = uuid.uuid4().hex
-                                                    db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?) ON CONFLICT (owner_id, weekday, category, name) DO NOTHING", (new_id, target_wd, view_as, t["category"], t["name"], t["points"]))
+                                                    db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?) ON CONFLICT (owner_id, weekday, category, name) DO NOTHING", (new_id, target_wd, view_as, task["category"], task["name"], task["points"]))
                                             db.commit(); db.end(); st.cache_data.clear(); st.success("任务同步成功！"); st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None); st.rerun()
                                         except Exception as ex: db.rollback(); db.end(); st.error(f"同步失败：{ex}")
                             if st.button("取消同步", key=f"cancel_sync_{view_as}_{sel_wd}"): st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None); st.rerun()
