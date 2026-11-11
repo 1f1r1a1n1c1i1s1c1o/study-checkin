@@ -2566,8 +2566,8 @@ def main():
                             mime="application/json",
                             key="cloud_backup_download"
                         )
-                    with st.expander("📖 如何配置外部定时备份"):
-                        st.markdown("""
+                    st.markdown("**📖 如何配置外部定时备份**")
+                    st.markdown("""
 - **推荐方案**：在你的 PostgreSQL 服务商（如 Supabase、Neon）控制台开启自动备份。
 - **或配置外部 cron**：定时执行 `pg_dump`，把 SQL 文件保存到对象存储。
 - **应用本身无法后台备份**：这是 Streamlit 的请求驱动架构限制；本页 JSON 导出只能在管理员打开页面时手动触发。
