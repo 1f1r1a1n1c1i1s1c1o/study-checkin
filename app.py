@@ -2401,14 +2401,78 @@ def main():
             st.divider(); st.markdown("### 3. 修改考试科目")
             try: exam_config, _ = get_exam_config(view_as)
             except: exam_config = {}
+
+            edit_exam_key = f"exam_edit_mode_{view_as}"
+            if edit_exam_key not in st.session_state: st.session_state[edit_exam_key] = False
+            header_cols = st.columns([3, 1])
+            header_cols[0].markdown(f"**考试科目（共 {len(exam_config)} 项）**")
+            if header_cols[1].button("完成编辑" if st.session_state[edit_exam_key] else "✏️ 编辑", key=f"toggle_edit_exam_{view_as}"):
+                st.session_state[edit_exam_key] = not st.session_state[edit_exam_key]; st.rerun()
+
+            selected_exam_subs = []
             if exam_config:
                 for sub, cfg in exam_config.items():
-                    c1, c2 = st.columns([3,1])
-                    c1.write(f"**{html.escape(sub)}** — {cfg.get('target')}")
-                    if c2.button("删除", key=f"del_sub_{sub}"):
-                        try:
-                            db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (sub, view_as)); db.commit(); st.cache_data.clear(); st.rerun()
-                        except RuntimeError: st.error(t("op_failed"))
+                    if st.session_state[edit_exam_key]:
+                        c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
+                        if c1.checkbox("", key=f"chk_exam_{view_as}_{sub}", label_visibility="collapsed"): selected_exam_subs.append(sub)
+                        c2.write(f"**{html.escape(sub)}**")
+                        if cfg.get("type") == "score": c3.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                        else: c3.write(f"等级制 | 目标 {cfg.get('target')}")
+                        c4.write(f"单档 {cfg.get('step_points', 0)} 分")
+                    else:
+                        c1, c2, c3 = st.columns([2, 5, 2])
+                        c1.write(f"**{html.escape(sub)}**")
+                        if cfg.get("type") == "score": c2.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                        else: c2.write(f"等级制 | 目标 {cfg.get('target')}")
+                        c3.write(f"单档 {cfg.get('step_points', 0)} 分")
+                if st.session_state[edit_exam_key]:
+                    st.divider()
+                    if selected_exam_subs:
+                        st.write(f"已选中 **{len(selected_exam_subs)}** 项")
+                        ac1, ac2 = st.columns(2)
+                        if len(selected_exam_subs) == 1:
+                            with ac1:
+                                if st.button("✏️ 编辑选中科目", key=f"edit_exam_btn_{view_as}"): st.session_state[f"editing_exam_sub_{view_as}"] = selected_exam_subs[0]
+                        with ac2:
+                            if st.button("🗑 删除选中科目", key=f"del_exam_btn_{view_as}", **_stretch({"type": "primary"})):
+                                db.begin()
+                                try:
+                                    for sub in selected_exam_subs:
+                                        db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (sub, view_as))
+                                    db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
+                                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
+                        edit_sub = st.session_state.get(f"editing_exam_sub_{view_as}")
+                        if edit_sub and edit_sub in exam_config:
+                            cfg = exam_config[edit_sub]
+                            st.info(f"正在编辑科目：{edit_sub}")
+                            with st.form(f"edit_exam_form_{view_as}_{edit_sub}"):
+                                ec1, ec2, ec3 = st.columns(3)
+                                e_sub = ec1.text_input("科目名称", value=edit_sub, key=f"e_sub_{edit_sub}")
+                                e_type = ec2.selectbox("类型", ["score", "grade"], index=0 if cfg.get("type")=="score" else 1, format_func=lambda x: "分数制" if x=="score" else "等级制")
+                                e_target = ec3.text_input("目标 (分数或等级)", value=str(cfg.get("target", "")), key=f"e_tgt_{edit_sub}")
+                                ec4, ec5, ec6 = st.columns(3)
+                                e_max = ec4.text_input("满分 (仅分数制)", value=str(cfg.get("max_score", "150")), key=f"e_max_{edit_sub}")
+                                e_step = ec5.text_input("分差 (仅分数制)", value=str(cfg.get("step", "0")), key=f"e_step_{edit_sub}")
+                                e_pts = ec6.text_input("单档奖励", value=str(cfg.get("step_points", "0")), key=f"e_pts_{edit_sub}")
+                                col_save, col_cancel = st.columns(2)
+                                if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
+                                    if not e_sub.strip() or not e_target.strip(): st.error("科目名称和目标不能为空")
+                                    else:
+                                        try:
+                                            pts_v = float(e_pts.strip() or "0")
+                                            if e_type == "score": cfg_new = {"type": "score", "max_score": float(e_max.strip() or "150"), "target": float(e_target.strip()), "step": float(e_step.strip() or "0"), "step_points": pts_v}
+                                            else: cfg_new = {"type": "grade", "target": e_target.strip(), "step_points": pts_v}
+                                            if e_sub.strip() != edit_sub:
+                                                if db.execute("SELECT 1 FROM config_exam WHERE subject=? AND owner_id=?", (e_sub.strip(), view_as)).fetchone(): st.error("新科目名称已存在"); st.stop()
+                                            db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (edit_sub, view_as))
+                                            db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (e_sub.strip(), view_as, json.dumps(cfg_new)))
+                                            db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_exam_sub_{view_as}", None); st.success("科目已更新！"); st.rerun()
+                                        except ValueError: st.error("分数/目标必须为数字")
+                                        except RuntimeError: st.error(t("op_failed"))
+                                if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_exam_sub_{view_as}", None); st.rerun()
+                    else: st.caption("请勾选科目以进行编辑或删除操作。")
+            else: st.caption("暂无考试科目。")
+
             with st.form(f"add_exam_form_{view_as}", clear_on_submit=True):
                 st.markdown("**➕ 新增科目（分数制）**")
                 ec1, ec2, ec3 = st.columns(3)
@@ -2426,7 +2490,7 @@ def main():
                             db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_sub.strip(), view_as, json.dumps(cfg)))
                             db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
                         except (ValueError, RuntimeError): st.error(t("op_failed"))
-
+                            
             st.divider(); st.markdown("### 4. 修改多科达成奖励")
             try: mh_list = get_exam_multihit(view_as)
             except: mh_list = []
