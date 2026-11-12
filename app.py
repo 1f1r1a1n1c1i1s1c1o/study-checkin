@@ -2144,35 +2144,62 @@ def main():
             except: exam_config = {}
             if not exam_config: st.warning(t("exam_no_subject"))
             else:
-                scores = {}; ranks = {}
-                subj_list = list(exam_config.keys())
-                for i in range(0, len(subj_list), 3):
-                    cols = st.columns(3)
-                    for j in range(3):
-                        if i + j < len(subj_list):
-                            sub = subj_list[i+j]; cfg = exam_config[sub]
-                            with cols[j]:
-                                if cfg["type"] == "score":
-                                    max_s = float(cfg.get("max_score", 150))
-                                    scores[sub] = st.number_input(html.escape(sub) + " " + t("exam_score", max=max_s, target=cfg['target']), min_value=0.0, max_value=max_s, value=float(cfg.get('target', 0)), key=f"ex_{view_as}_{sub}")
-                                else:
-                                    ti = GRADES.index(cfg['target']) if cfg['target'] in GRADES else 0
-                                    scores[sub] = st.selectbox(html.escape(sub) + " " + t("exam_grade", target=cfg['target']), GRADES, index=ti, key=f"ex_sel_{view_as}_{sub}")
-                st.write(t("exam_ranks"))
-                c1, c2, c3 = st.columns(3)
-                ranks["语文"] = c1.number_input(t("exam_cn"), 0.0, 100.0, 100.0, key=f"rk_cn_{view_as}")
-                ranks["数学"] = c2.number_input(t("exam_ma"), 0.0, 100.0, 100.0, key=f"rk_ma_{view_as}")
-                ranks["英语"] = c3.number_input(t("exam_en"), 0.0, 100.0, 100.0, key=f"rk_en_{view_as}")
-                total_pts, lines, hit_count = calc_exam_bonus(scores, ranks, view_as)
-                st.divider()
-                st.markdown(t("exam_estimate", pts=f"{total_pts:.1f}", hits=hit_count))
-                for ln in lines: st.write(ln)
-                if st.button(t("exam_save"), **_stretch({"type": "primary"})):
-                    try:
-                        detail_text = f"hit={hit_count} | " + "/".join([f"{k}:{v}" for k, v in scores.items()])
-                        db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
-                        db.commit(); st.cache_data.clear(); st.success(t("exam_saved")); st.rerun()
-                    except RuntimeError: st.error(t("op_failed"))
+                # 【H1 修复】第一层：页面加载时检查今日是否已提交
+                today_str_for_exam = now.date().isoformat()
+                try:
+                    submitted_today = db.execute(
+                        "SELECT id, detail, points, ts FROM exam_rewards WHERE owner_id=? AND substr(ts, 1, 10)=? ORDER BY id DESC LIMIT 1",
+                        (view_as, today_str_for_exam)
+                    ).fetchone()
+                except Exception:
+                    submitted_today = None
+
+                if submitted_today:
+                    # 已提交：显示记录，不显示表单
+                    time_part = str(submitted_today["ts"] or "")[11:16] or "?"
+                    pts_part = float(submitted_today["points"] or 0)
+                    st.info(t("exam_already_submitted", time=time_part, pts=f"{pts_part:.1f}"))
+                    st.caption(t("exam_detail_prefix", detail=html.escape(str(submitted_today["detail"] or ""))))
+                    st.caption(t("exam_one_per_day"))
+                else:
+                    # 未提交：正常显示录入表单
+                    scores = {}; ranks = {}
+                    subj_list = list(exam_config.keys())
+                    for i in range(0, len(subj_list), 3):
+                        cols = st.columns(3)
+                        for j in range(3):
+                            if i + j < len(subj_list):
+                                sub = subj_list[i+j]; cfg = exam_config[sub]
+                                with cols[j]:
+                                    if cfg["type"] == "score":
+                                        max_s = float(cfg.get("max_score", 150))
+                                        scores[sub] = st.number_input(html.escape(sub) + " " + t("exam_score", max=max_s, target=cfg['target']), min_value=0.0, max_value=max_s, value=float(cfg.get('target', 0)), key=f"ex_{view_as}_{sub}")
+                                    else:
+                                        ti = GRADES.index(cfg['target']) if cfg['target'] in GRADES else 0
+                                        scores[sub] = st.selectbox(html.escape(sub) + " " + t("exam_grade", target=cfg['target']), GRADES, index=ti, key=f"ex_sel_{view_as}_{sub}")
+                    st.write(t("exam_ranks"))
+                    c1, c2, c3 = st.columns(3)
+                    ranks["语文"] = c1.number_input(t("exam_cn"), 0.0, 100.0, 100.0, key=f"rk_cn_{view_as}")
+                    ranks["数学"] = c2.number_input(t("exam_ma"), 0.0, 100.0, 100.0, key=f"rk_ma_{view_as}")
+                    ranks["英语"] = c3.number_input(t("exam_en"), 0.0, 100.0, 100.0, key=f"rk_en_{view_as}")
+                    total_pts, lines, hit_count = calc_exam_bonus(scores, ranks, view_as)
+                    st.divider()
+                    st.markdown(t("exam_estimate", pts=f"{total_pts:.1f}", hits=hit_count))
+                    for ln in lines: st.write(ln)
+                    if st.button(t("exam_save"), **_stretch({"type": "primary"})):
+                        try:
+                            # 【H1 修复】第二层：提交时再查一次，防止多 tab 并发提交
+                            again = db.execute(
+                                "SELECT id FROM exam_rewards WHERE owner_id=? AND substr(ts, 1, 10)=?",
+                                (view_as, today_str_for_exam)
+                            ).fetchone()
+                            if again:
+                                st.error(t("exam_duplicate_error"))
+                            else:
+                                detail_text = f"hit={hit_count} | " + "/".join([f"{k}:{v}" for k, v in scores.items()])
+                                db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
+                                db.commit(); st.cache_data.clear(); st.success(t("exam_saved")); st.rerun()
+                        except RuntimeError: st.error(t("op_failed"))
 
     # ============ 事件 ============
     if t("tab_event") in tab_dict:
