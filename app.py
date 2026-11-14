@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 【v4 安全加固完整版 + 用户搜索 + 7 语言】
-# 本次 5 项中危加固：
-# 6. 云端 PostgreSQL 增加管理员一键 JSON 全库导出 + 外部备份说明；_backup_sqlite 云端分支只提示不阻塞
-# 7. 新增 schema_migrations，把破坏性 DROP CONSTRAINT 清理封装为只执行一次的 run_legacy_constraint_cleanup
-# 8. 新增统一权限辅助函数 is_admin / is_host / is_user / is_solo / can_manage_others / can_edit_configs / require_admin / require_admin_or_host
-# 9. 新增 validate_password_strength，并在注册、侧边栏修改密码、强制改密、找回密码处增加提示与后端校验；7 语言补齐 pwd_* key
-# 10. all_tbls 列表改为不可变常量元组 ALL_TABLES，新增 delete_user_all_data，彻底删除用户统一走安全函数
-#
-# 保留：7 语言、排行榜、周报、补签、会员到期拦截、webhook、用户搜索、多角色功能。
+# 【v5 完整修复版】
+# 修复 v4 遗留的 3 处粘贴事故：
+#   - ### 3 修改考试科目：删除第一次残缺段，保留完整段
+#   - ### 6 全局徽章：删除重复标题
+#   - ### 7 用户管理：删除第一次残缺段，保留完整段
+# 保留：7 语言 / H1 考试防刷 / 5 项中危加固 / 用户搜索 / 系统设置 3-7 编辑模式
 import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid, hmac
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -35,7 +32,6 @@ else:
     psycopg2 = DummyPsycopg2()
 
 # ==================== 多语言 ====================
-# 语言代码：zh 中文 / en 英文 / ja 日文 / fr 法文 / ru 俄文 / es 西班牙文 / ar 阿拉伯文
 LANG_PACKS = {
 "zh": {
     "language":"语言 / Language","app_title":"学习打卡系统",
@@ -206,7 +202,7 @@ LANG_PACKS = {
     "language":"言語 / Language","app_title":"学習チェックイン",
     "login":"ログイン","register":"新規登録","find_pwd":"パスワード再設定","username":"ユーザー名","password":"パスワード",
     "set_username":"ユーザー名","set_pwd":"パスワード","confirm_pwd":"パスワード確認",
-    "security_q":"秘密の質問 (例：ラッキーナンバーは？)","security_a":"秘密の答え",
+    "security_q":"秘密の質問","security_a":"秘密の答え",
     "login_btn":"ログイン","register_btn":"登録","reset_btn":"パスワードをリセット",
     "wrong_creds":"ユーザー名またはパスワードが違います","fill_all":"すべての項目を入力してください","pwd_mismatch":"パスワードが一致しません",
     "reserved_name":"このユーザー名は予約されています","user_exists":"ユーザー名は既に存在します",
@@ -637,19 +633,12 @@ def t(key, **fmt):
         except Exception: return s
     return s
 
-# 【中危加固 9】密码强度统一校验：必须放在 t() 之后
 def validate_password_strength(pwd: str) -> str | None:
-    """返回错误提示；None 表示通过"""
-    if not pwd:
-        return t("pwd_err_empty")
-    if len(pwd) < 6:
-        return t("pwd_err_too_short")
-    if len(pwd) > 72:
-        return t("pwd_err_too_long")
-    if pwd == "123456":
-        return t("pwd_err_default")
-    if pwd.isdigit():
-        return t("pwd_err_all_digits")
+    if not pwd: return t("pwd_err_empty")
+    if len(pwd) < 6: return t("pwd_err_too_short")
+    if len(pwd) > 72: return t("pwd_err_too_long")
+    if pwd == "123456": return t("pwd_err_default")
+    if pwd.isdigit(): return t("pwd_err_all_digits")
     return None
 
 def get_weekday(idx):
@@ -739,7 +728,6 @@ def _log_db_error(op_type, err_msg):
             f.write(f"[{now}] {op_type} | {err_msg}\n")
     except Exception: pass
 
-# 【中危加固 10】表名白名单提升为不可变常量元组，外部不可注入
 ALL_TABLES = (
     "users",
     "daily_records", "period_bonus", "redemptions",
@@ -750,7 +738,6 @@ ALL_TABLES = (
 )
 
 def delete_user_all_data(db, uname: str):
-    """彻底删除某用户所有数据。表名来自常量 ALL_TABLES，外部不可注入。"""
     db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
     for tbl in ALL_TABLES:
         if tbl == "redeem_codes":
@@ -765,7 +752,6 @@ def delete_user_all_data(db, uname: str):
         except Exception as e:
             _log_db_error(f"delete_{tbl}", str(e))
 
-# 【中危加固 6】云端模式不再静默 return，只提示
 def _backup_sqlite():
     if IS_CLOUD:
         print("ℹ️ 云端模式：无本地 SQLite 备份；请使用系统设置里的『下载完整备份』或配置外部 pg_dump 定时任务。")
@@ -919,7 +905,6 @@ def get_db():
         conn.row_factory = sqlite3.Row
         db = DBWrapper(conn, False); init_db(db); _backup_sqlite(); return db
 
-# 【中危加固 7】破坏性 DDL 迁移只执行一次
 def run_legacy_constraint_cleanup(db):
     try:
         db.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT)")
@@ -993,9 +978,7 @@ def run_legacy_constraint_cleanup(db):
 
 def init_db(db):
     if db.is_cloud:
-        # 【中危加固 7】内部自带“只跑一次”判断
         run_legacy_constraint_cleanup(db)
-        # 后续建表、ALTER TABLE ADD COLUMN 等幂等操作保留不动
 
     tables_common = [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT, plan_expires_at TEXT, language TEXT)",
@@ -1127,7 +1110,6 @@ def get_all_users():
     db = get_db()
     return [{"username": r["username"], "role": r["role"], "plan_expires_at": r["plan_expires_at"]} for r in db.execute("SELECT username, role, plan_expires_at FROM users").fetchall()]
 
-# 【中危加固 8】轻量权限辅助函数，统一权限入口
 def is_admin(role): return role == "admin"
 def is_host(role): return role == "host"
 def is_user(role): return role == "user"
@@ -1492,7 +1474,6 @@ def login_page(db):
         with st.form(f"reg_form_{uid}"):
             u = st.text_input(t("set_username"), max_chars=20)
             p = st.text_input(t("set_pwd"), type="password", max_chars=72)
-            # 【中危加固 9】注册页密码提示
             st.caption(t("pwd_req"))
             p2 = st.text_input(t("confirm_pwd"), type="password", max_chars=72)
             sq = st.text_input(t("security_q"), max_chars=50)
@@ -1502,7 +1483,6 @@ def login_page(db):
                 elif p != p2: st.error(t("pwd_mismatch"))
                 elif u.lower() in ["system", "admin"]: st.error(t("reserved_name"))
                 else:
-                    # 【中危加固 9】任何数据库操作之前校验密码强度
                     err = validate_password_strength(p)
                     if err:
                         st.error(err); st.stop()
@@ -1532,7 +1512,6 @@ def login_page(db):
                             st.info(f"{t('security_q')}: {html.escape(sq)}")
                             ans = st.text_input(t("security_a"), max_chars=50)
                             new_p = st.text_input(t("new_password"), type="password", max_chars=72)
-                            # 【中危加固 9】找回密码页也统一提示与校验
                             st.caption(t("pwd_req"))
                             if _submit(t("reset_btn"), **_stretch({"type": "primary"})):
                                 if not ans or not new_p: st.error(t("fill_all"))
@@ -1581,7 +1560,6 @@ def main():
         st.warning("检测到您正在使用系统默认密码 (123456)，为了您的数据安全，请立即修改后才能继续使用。")
         with st.form("force_pwd_form"):
             new_p = st.text_input(t("new_password"), type="password", max_chars=72)
-            # 【中危加固 9】强制改密页密码提示
             st.caption(t("pwd_req"))
             confirm_p = st.text_input(t("confirm_pwd"), type="password", max_chars=72)
             submit = _submit("提交修改", **_stretch({"type": "primary"}))
@@ -1640,7 +1618,6 @@ def main():
             except: child_names = []
             if not child_names: view_as = None; st.warning(t("no_children_bound"))
             else:
-                # 多孩子时提供搜索
                 if len(child_names) > 5:
                     kw = st.text_input(t("search_children"), key="host_child_search")
                     if kw:
@@ -1655,7 +1632,6 @@ def main():
             except: all_users = []
             user_list = [u["username"] for u in all_users]
             if current_user in user_list: user_list.remove(current_user); user_list.insert(0, current_user)
-            # 侧边栏搜索用户
             kw = st.text_input(t("search_users"), key="admin_sidebar_search")
             if kw: user_list = [x for x in user_list if kw.lower() in x.lower()]
             if not user_list: st.warning(t("no_match"))
@@ -1760,7 +1736,6 @@ def main():
 
                 st.divider()
                 new_pwd = st.text_input(t("new_password"), type="password", key="new_pwd", max_chars=72)
-                # 【中危加固 9】侧边栏修改密码提示
                 st.caption(t("pwd_req"))
                 if st.button(t("change_pwd"), **_stretch({})):
                     if new_pwd:
@@ -1951,7 +1926,6 @@ def main():
     # ============ 偶发 ============
     if t("tab_extra") in tab_dict:
         with tab_dict[t("tab_extra")]:
-            # 【中危加固 8】偶发事件统一权限入口；保留 solo 可编辑自身配置的行为
             if not can_edit_configs(current_role):
                 st.warning(t("extra_only_parent")); st.stop()
             st.subheader(t("extra_title"))
@@ -2144,7 +2118,6 @@ def main():
             except: exam_config = {}
             if not exam_config: st.warning(t("exam_no_subject"))
             else:
-                # 【H1 修复】第一层：页面加载时检查今日是否已提交
                 today_str_for_exam = now.date().isoformat()
                 try:
                     submitted_today = db.execute(
@@ -2155,14 +2128,12 @@ def main():
                     submitted_today = None
 
                 if submitted_today:
-                    # 已提交：显示记录，不显示表单
                     time_part = str(submitted_today["ts"] or "")[11:16] or "?"
                     pts_part = float(submitted_today["points"] or 0)
                     st.info(t("exam_already_submitted", time=time_part, pts=f"{pts_part:.1f}"))
                     st.caption(t("exam_detail_prefix", detail=html.escape(str(submitted_today["detail"] or ""))))
                     st.caption(t("exam_one_per_day"))
                 else:
-                    # 未提交：正常显示录入表单
                     scores = {}; ranks = {}
                     subj_list = list(exam_config.keys())
                     for i in range(0, len(subj_list), 3):
@@ -2188,7 +2159,6 @@ def main():
                     for ln in lines: st.write(ln)
                     if st.button(t("exam_save"), **_stretch({"type": "primary"})):
                         try:
-                            # 【H1 修复】第二层：提交时再查一次，防止多 tab 并发提交
                             again = db.execute(
                                 "SELECT id FROM exam_rewards WHERE owner_id=? AND substr(ts, 1, 10)=?",
                                 (view_as, today_str_for_exam)
@@ -2224,7 +2194,7 @@ def main():
                 else:
                     if st.button(t("event_roll_btn"), **_stretch({})): st.session_state["confirm_roll"] = True; st.rerun()
 
-    # ============ 系统设置（保留中文/英文为主，因管理员操作） ============
+    # ============ 系统设置 ============
     if t("tab_settings") in tab_dict:
         with tab_dict[t("tab_settings")]:
             st.subheader(t("tab_settings"))
@@ -2232,8 +2202,9 @@ def main():
             if view_as == current_user: st.info(f"{html.escape(view_as)}")
             else: st.info(f"{html.escape(view_as)} ({role_names.get(view_role, view_role)})")
 
+            # ---- 1. 修改每日任务 ----
             st.markdown("### 1. 修改每日任务")
-            sel_wd = st.selectbox(t("select_date") if False else "选择要修改的星期", range(7), format_func=lambda x: get_weekday(x))
+            sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: get_weekday(x))
             try: tasks_list = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=? ORDER BY category ASC, name ASC", (sel_wd, view_as)).fetchall()
             except: tasks_list = []
             edit_mode_key = f"task_edit_mode_{view_as}_{sel_wd}"
@@ -2329,6 +2300,7 @@ def main():
                                 db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
                             except RuntimeError: st.error(t("op_failed"))
 
+            # ---- 2. 修改商城奖励 ----
             st.divider(); st.markdown("### 2. 修改商城奖励")
             try: shop_list = db.execute("SELECT * FROM config_shop WHERE owner_id=? ORDER BY id ASC", (view_as,)).fetchall()
             except: shop_list = []
@@ -2398,65 +2370,7 @@ def main():
                                 db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
                             except RuntimeError: st.error(t("op_failed"))
 
-            st.divider(); st.markdown("### 3. 修改考试科目")
-            try: exam_config, _ = get_exam_config(view_as)
-            except: exam_config = {}
-
-            edit_exam_key = f"exam_edit_mode_{view_as}"
-            if edit_exam_key not in st.session_state: st.session_state[edit_exam_key] = False
-            header_cols = st.columns([3, 1])
-            header_cols[0].markdown(f"**考试科目（共 {len(exam_config)} 项）**")
-            if header_cols[1].button("完成编辑" if st.session_state[edit_exam_key] else "✏️ 编辑", key=f"toggle_edit_exam_{view_as}"):
-                st.session_state[edit_exam_key] = not st.session_state[edit_exam_key]; st.rerun()
-
-            selected_exam_subs = []
-            if exam_config:
-                for sub, cfg in exam_config.items():
-                    if st.session_state[edit_exam_key]:
-                        c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
-                        if c1.checkbox("", key=f"chk_exam_{view_as}_{sub}", label_visibility="collapsed"): selected_exam_subs.append(sub)
-                        c2.write(f"**{html.escape(sub)}**")
-                        if cfg.get("type") == "score": c3.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
-                        else: c3.write(f"等级制 | 目标 {cfg.get('target')}")
-                        c4.write(f"单档 {cfg.get('step_points', 0)} 分")
-                    else:
-                        c1, c2, c3 = st.columns([2, 5, 2])
-                        c1.write(f"**{html.escape(sub)}**")
-                        if cfg.get("type") == "score": c2.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
-                        else: c2.write(f"等级制 | 目标 {cfg.get('target')}")
-                        c3.write(f"单档 {cfg.get('step_points', 0)} 分")
-                if st.session_state[edit_exam_key]:
-                    st.divider()
-                    if selected_exam_subs:
-                        st.write(f"已选中 **{len(selected_exam_subs)}** 项")
-                        ac1, ac2 = st.columns(2)
-                        if len(selected_exam_subs) == 1:
-                            with ac1:
-                                if st.button("✏️ 编辑选中科目", key=f"edit_exam_btn_{view_as}"): st.session_state[f"editing_exam_sub_{view_as}"] = selected_exam_subs[0]
-                        with ac2:
-                            if st.button("🗑 删除选中科目", key=f"del_exam_btn_{view_as}", **_stretch({"type": "primary"})):
-                                db.begin()
-                                try:
-                                    for sub in selected_exam_subs:
-                                        db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (sub, view_as))
-                                    db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                        edit_sub = st.session_state.get(f"editing_exam_sub_{view_as}")
-                        if edit_sub and edit_sub in exam_config:
-                            cfg = exam_config[edit_sub]
-                            st.info(f"正在编辑科目：{edit_sub}")
-                            with st.form(f"edit_exam_form_{view_as}_{edit_sub}"):
-                                ec1, ec2, ec3 = st.columns(3)
-                                e_sub = ec1.text_input("科目名称", value=edit_sub, key=f"e_sub_{edit_sub}")
-                                e_type = ec2.selectbox("类型", ["score", "grade"], index=0 if cfg.get("type")=="score" else 1, format_func=lambda x: "分数制" if x=="score" else "等级制")
-                                e_target = ec3.text_input("目标 (分数或等级)", value=str(cfg.get("target", "")), key=f"e_tgt_{edit_sub}")
-                                ec4, ec5, ec6 = st.columns(3)
-                                e_max = ec4.text_input("满分 (仅分数制)", value=str(cfg.get("max_score", "150")), key=f"e_max_{edit_sub}")
-                                e_step = ec5.text_input("分差 (仅分数制)", value=str(cfg.get("step", "0")), key=f"e_step_{edit_sub}")
-                                e_pts = ec6.text_input("单档奖励", value=str(cfg.get("step_points", "0")), key=f"e_pts_{edit_sub}")
-                                col_save, col_cancel = st.columns(2)
-                                if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
-                                    if not e_sub.strip() or not e_target.strip(): st.error("科目名称和目标不能为空")
+            # ---- 3. 修改考试科目 ----
             st.divider(); st.markdown("### 3. 修改考试科目")
             try: exam_config, _ = get_exam_config(view_as)
             except: exam_config = {}
@@ -2549,7 +2463,8 @@ def main():
                             db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_sub.strip(), view_as, json.dumps(cfg)))
                             db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
                         except (ValueError, RuntimeError): st.error(t("op_failed"))
-                            
+
+            # ---- 4. 修改多科达成奖励 ----
             st.divider(); st.markdown("### 4. 修改多科达成奖励")
             try: mh_list = get_exam_multihit(view_as)
             except: mh_list = []
@@ -2624,6 +2539,7 @@ def main():
                         db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
                     except (ValueError, RuntimeError): st.error(t("op_failed"))
 
+            # ---- 5. 阈值与 Bonus 规则 ----
             st.divider(); st.markdown("### 5. 阈值与 Bonus 规则（下次打卡时生效）")
             try: thresholds = get_thresholds(view_as); bonus_rules = get_bonus_rules(view_as)
             except: thresholds = {}; bonus_rules = DEFAULT_BONUS_RULES
@@ -2695,7 +2611,7 @@ def main():
                             db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
                         except RuntimeError: st.error(t("op_failed"))
 
-            # 徽章管理
+            # ---- 6. 全局徽章 ----
             st.divider(); st.markdown("### 6. 全局徽章")
             if is_admin(view_role):
                 require_admin(view_role)
@@ -2781,54 +2697,7 @@ def main():
                             except RuntimeError: st.error(t("op_failed"))
             else: st.info("管理员配置")
 
-            # 用户管理（含搜索）
-            if is_admin(view_role):
-                require_admin(view_role)
-                st.divider(); st.markdown("### 7. 用户管理与权限控制")
-                # 搜索框
-                user_kw = st.text_input(t("search_users"), key="admin_user_search")
-                filtered_users = all_users_data
-                if user_kw:
-                    filtered_users = [u for u in all_users_data if user_kw.lower() in u["username"].lower()]
-                st.caption(f"共 {len(filtered_users)} / {len(all_users_data)} 人")
-                if not filtered_users:
-                    st.warning(t("no_match"))
-                for u in filtered_users:
-                    uname = u["username"]; urole = u["role"]
-                    try: host_row = db.execute("SELECT host_id FROM users WHERE username=?", (uname,)).fetchone(); uhost = dict(host_row).get("host_id") if host_row else None
-                    except: uhost = None
-                    is_self = (uname == current_user)
-                    role_badge = {"admin":"🟢","host":"🟡","user":"⚪","solo":"🔵"}.get(urole, urole)
-                    plan_exp = u.get("plan_expires_at") or ""
-                    is_perm = str(plan_exp).startswith("2099")
-                    plan_str = " [∞]" if is_perm else (f" [{str(plan_exp)[:10]}]" if plan_exp else " [exp]")
-                    c1, c2, c3, c4 = st.columns([3,2,3,2])
-                    c1.write(f"👤 **{html.escape(uname)}**{plan_str}" + (" (you)" if is_self else ""))
-                    c2.write(role_badge)
-                    c3.write(f"↳ {html.escape(uhost)}" if uhost else "—")
-                    if not is_self:
-                        with c4:
-                            with st.expander("操作"):
-                                if st.button("→ Admin", key=f"set_admin_{uname}", **_stretch({})):
-                                    try: db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                    except RuntimeError: st.error(t("op_failed"))
-                                if st.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host"), **_stretch({})):
-                                    try: db.execute("UPDATE users SET role='host' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                    except RuntimeError: st.error(t("op_failed"))
-                                if st.button("→ User", key=f"set_user_{uname}", disabled=(urole == "user"), **_stretch({})):
-                                    try: db.execute("UPDATE users SET role='user' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                    except RuntimeError: st.error(t("op_failed"))
-                                if st.button("→ Solo", key=f"set_solo_{uname}", disabled=(urole == "solo"), **_stretch({})):
-                                    try: db.execute("UPDATE users SET role='solo' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                    except RuntimeError: st.error(t("op_failed"))
-                                if st.button("⭐ 永久", key=f"set_perm_{uname}", disabled=is_perm, **_stretch({})):
-                                    try: db.execute("UPDATE users SET plan_expires_at='2099-12-31 23:59:59' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                    except RuntimeError: st.error(t("op_failed"))
-                                if st.button("重置密码", key=f"reset_{uname}", **_stretch({})):
-                                    try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname)); db.commit(); st.success("OK")
-                                    except RuntimeError: st.error(t("op_failed"))
-                                bv = st.text_input("绑定 host", value=uhost or "", key=f"bind_val_{uname}", label_visibility="collapsed")
-                                if st.button("保存绑定", key=f"save_bind_{uname}", **_stretch({})):
+            # ---- 7. 用户管理与权限控制 ----
             if is_admin(view_role):
                 require_admin(view_role)
                 st.divider(); st.markdown("### 7. 用户管理与权限控制")
@@ -2954,7 +2823,6 @@ def main():
                             db.commit(); st.success("OK"); st.code(nc, language="text")
                         except RuntimeError: st.error(t("op_failed"))
 
-                # 【中危加固 6】云端数据库备份（管理员）
                 with st.expander("☁️ 云端数据库备份（管理员）"):
                     st.caption("Streamlit 没有后台定时任务能力，应用内提供一键 JSON 全库导出，作为云端 PostgreSQL 的最大补偿。")
                     if st.button("📥 生成完整备份 (JSON)", key="cloud_backup_generate"):
