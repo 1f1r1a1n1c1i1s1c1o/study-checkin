@@ -2697,7 +2697,6 @@ def main():
 
             # 徽章管理
             st.divider(); st.markdown("### 6. 全局徽章")
-            st.divider(); st.markdown("### 6. 全局徽章")
             if is_admin(view_role):
                 require_admin(view_role)
                 try: existing_badges = get_badge_configs()
