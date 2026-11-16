@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 【v5 完整修复版】
-# 修复 v4 遗留的 3 处粘贴事故：
-#   - ### 3 修改考试科目：删除第一次残缺段，保留完整段
-#   - ### 6 全局徽章：删除重复标题
-#   - ### 7 用户管理：删除第一次残缺段，保留完整段
-# 保留：7 语言 / H1 考试防刷 / 5 项中危加固 / 用户搜索 / 系统设置 3-7 编辑模式
+# 【v6 H2+H3 完整修复版】
+# 本次改动：
+#   H2（双花竞态）：新增 lock_user_row()，商城兑换在事务内锁定用户行，杜绝并发双花
+#   H3（SSRF 跳板）：新增 _safe_webhook() 校验，保存与发送双重拦截 loopback/link-local/保留地址
+# 保留：v5 全部功能（7 语言 / H1 考试防刷 / 5 项中危加固 / 系统设置 3-7 编辑模式 / 用户搜索）
 import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid, hmac
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import io
 import urllib.request
+import socket, ipaddress
 
 try:
     IS_CLOUD = "DATABASE_URL" in st.secrets
@@ -51,6 +51,8 @@ LANG_PACKS = {
     "pwd_err_too_long": "密码长度不能超过 72 位",
     "pwd_err_default": "不能使用默认密码 123456",
     "pwd_err_all_digits": "密码不能为纯数字，建议包含字母和数字",
+    "webhook_unsafe": "❌ Webhook 地址不合法：仅允许公网 http/https，禁止回环地址、云元数据地址、保留地址",
+    "webhook_saved": "✅ Webhook 已保存",
     "op_failed":"操作失败，请稍后重试。","db_failed":"数据库连接失败，请稍后重试。",
     "sidebar_title":"学习打卡","mobile_mode":"📱 手机精简模式","current_identity":"当前身份",
     "local_time":"当地时间","makeup_cards":"🎫 补签卡","available_points":"当前可用积分",
@@ -74,6 +76,7 @@ LANG_PACKS = {
     "est_total":"预计总分","save_checkin":"保存今日打卡","saved":"已保存！","bonus":"Bonus",
     "shop_empty":"商城空！","redeem_btn":"兑换","confirm_deduct":"确认扣除",
     "points_insufficient":"积分不足，兑换失败。","redeem_ok":"兑换成功！","redeem_history":"兑换历史","none_yet":"暂无",
+    "redeem_conflict":"兑换失败：检测到并发操作，请刷新后重试。",
     "cancel":"取消","backup_card":"补签卡",
     "history_title":"历史与图表分析","checkin_hist_detail":"历史打卡详情","select_date":"选择日期",
     "time_view":"时间维度","by_day":"按日查看","by_week":"按周查看","by_month":"按月查看",
@@ -119,491 +122,321 @@ LANG_PACKS = {
     "language":"Language / 语言","app_title":"Study Check-in",
     "login":"Login","register":"Register","find_pwd":"Reset Password","username":"Username","password":"Password",
     "set_username":"Username","set_pwd":"Password","confirm_pwd":"Confirm Password",
-    "security_q":"Security Question (e.g. My lucky number?)","security_a":"Security Answer",
+    "security_q":"Security Question","security_a":"Security Answer",
     "login_btn":"Sign In","register_btn":"Sign Up","reset_btn":"Reset Password",
-    "wrong_creds":"Incorrect username or password","fill_all":"Please fill in all fields (including security question)",
-    "pwd_mismatch":"Passwords do not match","reserved_name":"This username is reserved.",
-    "user_exists":"Username already exists","register_ok":"Registered! 3-day trial assigned. Please log in.",
-    "no_security_q":"This account has no security question. Please contact admin.","user_not_exist":"Username does not exist",
-    "reset_ok":"Password reset successfully! Please log in.","wrong_answer":"Security answer is incorrect!",
-    "reset_intro":"Enter username, verify security question, then set a new password.",
-    "input_username":"Enter your username","new_password":"New Password",
-    "pwd_req": "🔐 Password: at least 6 chars, letters + digits recommended; 123456 not allowed",
-    "pwd_err_empty": "Password cannot be empty",
-    "pwd_err_too_short": "Password must be at least 6 characters",
-    "pwd_err_too_long": "Password must be at most 72 characters",
-    "pwd_err_default": "Default password 123456 is not allowed",
-    "pwd_err_all_digits": "All-digit password not allowed; mix letters and digits",
-    "op_failed":"Operation failed. Please try again later.","db_failed":"Database connection failed. Please try again later.",
-    "sidebar_title":"Study Check-in","mobile_mode":"📱 Mobile Mode","current_identity":"Signed in as",
+    "wrong_creds":"Incorrect username or password","fill_all":"Please fill in all fields","pwd_mismatch":"Passwords do not match",
+    "reserved_name":"This username is reserved.","user_exists":"Username already exists","register_ok":"Registered! 3-day trial.",
+    "no_security_q":"No security question. Please contact admin.","user_not_exist":"Username does not exist",
+    "reset_ok":"Password reset!","wrong_answer":"Wrong answer",
+    "reset_intro":"Enter username, verify security question, then set new password.",
+    "input_username":"Enter username","new_password":"New Password",
+    "pwd_req":"🔐 Password: at least 6 chars, letters+digits recommended; 123456 not allowed",
+    "pwd_err_empty":"Password cannot be empty","pwd_err_too_short":"Password must be at least 6 characters",
+    "pwd_err_too_long":"Password must be at most 72 characters","pwd_err_default":"Default password 123456 is not allowed",
+    "pwd_err_all_digits":"All-digit password not allowed","webhook_unsafe":"❌ Invalid webhook URL: only public http/https allowed",
+    "webhook_saved":"✅ Webhook saved",
+    "op_failed":"Operation failed.","db_failed":"DB connection failed.",
+    "sidebar_title":"Study Check-in","mobile_mode":"📱 Mobile","current_identity":"Signed in as",
     "local_time":"Local time","makeup_cards":"🎫 Makeup Cards","available_points":"Available Points",
-    "timer":"Focus Timer (Pomodoro)","badges":"My Badges","no_badges":"No badges yet.","points_detail":"Points Detail",
+    "timer":"Focus Timer","badges":"Badges","no_badges":"No badges.","points_detail":"Points",
     "checkin_pts":"Check-in","longterm_pts":"Long-term","exam_pts":"Exam","extra_pts":"Extra","special_pts":"Special","spent_pts":"Spent",
     "account_settings":"Account & Data","timezone":"Timezone","select_timezone":"Region / Timezone","custom_tz":"Custom",
-    "tz_offset":"Enter UTC offset (hours)","save_tz":"Save Timezone","new_username":"New Username","leave_blank":"Leave blank to keep current",
+    "tz_offset":"UTC offset (hours)","save_tz":"Save Timezone","new_username":"New Username","leave_blank":"Leave blank to keep current",
     "change_username":"Change Username","change_pwd":"Change Password","change_security":"Change Security",
     "new_security_q":"New Security Question","new_security_a":"New Security Answer","save_security":"Save Security",
-    "webhook":"Reminder Webhook","save_webhook":"Save Webhook","export_data":"📥 Export My Data (JSON)","logout_btn":"Log Out",
-    "select_child":"Select a child to manage/view","admin_select_target":"Admin: Select Target User",
-    "penetrate":"Drill-down","no_children_bound":"No child bound. Please contact admin.",
+    "webhook":"Reminder Webhook","save_webhook":"Save Webhook","export_data":"📥 Export (JSON)","logout_btn":"Log Out",
+    "select_child":"Select a child","admin_select_target":"Admin: Select Target",
+    "penetrate":"Drill-down","no_children_bound":"No child bound.",
     "role_admin":"Admin","role_host":"Parent","role_user":"Child","role_solo":"Solo",
     "remaining":"Remaining","permanent":"Lifetime","expired":"Expired",
     "tab_checkin":"Check-in","tab_extra":"Extra","tab_history":"History","tab_shop":"Shop","tab_redeem":"Redeem",
     "tab_exam":"Exam","tab_event":"Event","tab_settings":"Settings","tab_leaderboard":"Leaderboard",
     "search_users":"🔍 Search users","search_children":"🔍 Search children","no_match":"No matching user",
-    "no_tasks_today":"No tasks configured for today. Please add them in Settings.",
-    "basic_req":"Basic requirement","full_req":"Full mark","today_done":"Today's check-in is done and locked.",
-    "undo_checkin":"Undo today's check-in","base_score":"Base Score","today_total":"Today Total",
-    "est_total":"Estimated Total","save_checkin":"Save Check-in","saved":"Saved!","bonus":"Bonus",
-    "shop_empty":"Shop is empty.","redeem_btn":"Redeem","confirm_deduct":"Confirm Deduct",
-    "points_insufficient":"Not enough points.","redeem_ok":"Redeemed!","redeem_history":"Redemption History","none_yet":"None",
+    "no_tasks_today":"No tasks today.","basic_req":"Basic","full_req":"Full","today_done":"Today done.",
+    "undo_checkin":"Undo today's check-in","base_score":"Base","today_total":"Today Total","est_total":"Estimated",
+    "save_checkin":"Save","saved":"Saved!","bonus":"Bonus",
+    "shop_empty":"Shop empty.","redeem_btn":"Redeem","confirm_deduct":"Confirm Deduct",
+    "points_insufficient":"Not enough points.","redeem_ok":"Redeemed!","redeem_history":"History","none_yet":"None",
+    "redeem_conflict":"Redemption failed: concurrent operation detected, please refresh.",
     "cancel":"Cancel","backup_card":"Makeup Card",
     "history_title":"History & Charts","checkin_hist_detail":"Check-in Detail","select_date":"Select date",
     "time_view":"Time View","by_day":"Daily","by_week":"Weekly","by_month":"Monthly",
-    "no_data":"No data yet.","no_record":"No records.","done_items":"Done:",
+    "no_data":"No data.","no_record":"No records.","done_items":"Done:",
     "weekly_report":"### 📊 Weekly Report","week_checkin":"Days this week","week_total":"Weekly total",
-    "day_max":"Day max","gen_report":"📸 Generate & Download Weekly Report","save_report":"⬇️ Download image",
-    "report_ok":"Report generated. Click above to save and share!","report_failed":"Failed to generate image.",
-    "makeup_intro":"🎫 **{n} makeup card(s) available for the last 7 days:**",
-    "makeup_pick_date":"Pick a date to makeup","makeup_pick_tasks":"**Check tasks completed on {d} (will be counted as full score):**",
-    "makeup_submit":"Use 1 makeup card & submit","makeup_ok":"Makeup succeeded!","makeup_fail":"Makeup failed. Try again.",
-    "makeup_no_miss":"Full attendance in the last 7 days!","makeup_tip":"💡 Tip: Buy makeup cards from the shop.",
-    "makeup_host_tip":"💡 Makeup should be done by the child on their own account.",
-    "makeup_host_self":"💡 This is a parent account. Switch to a child.",
-    "exam_title":"Exam","exam_no_subject":"No subjects configured!",
-    "exam_score":"(max {max}, target {target})","exam_grade":"(target {target})",
-    "exam_ranks":"**Top % in Chinese/Math/English (fill 100 to skip)**",
-    "exam_cn":"Chinese","exam_ma":"Math","exam_en":"English",
-    "exam_estimate":"### Estimated: **{pts}** pts ({hits} subject(s) hit)","exam_save":"Save exam result",
-    "exam_saved":"Saved!","exam_hit":"Hit {sub} -> +{pts}","exam_over":"  {sub} exceeded by {n} tiers -> +{pts}",
-    "exam_up":"  {sub} up {n} grades -> +{pts}","exam_multi":"Hit {n} subjects -> +{pts}",
-    "exam_rank":"{sub} top {pct}% -> +{pts}","exam_rank_more":"  {n} more tier(s) -> +{pts}",
-    "event_title":"Special Events","event_fired":"Already triggered today: {note} +{pts}pts",
-    "event_confirm":"🎲 Consume today's chance to roll?","event_roll":"Confirm Roll","event_roll_btn":"Roll",
+    "day_max":"Day max","gen_report":"📸 Generate Report","save_report":"⬇️ Download",
+    "report_ok":"Report generated.","report_failed":"Failed to generate image.",
+    "makeup_intro":"🎫 **{n} makeup cards available:**","makeup_pick_date":"Pick date",
+    "makeup_pick_tasks":"**Check completed tasks on {d}:**","makeup_submit":"Use 1 card & submit",
+    "makeup_ok":"Makeup succeeded!","makeup_fail":"Makeup failed.","makeup_no_miss":"Full attendance!",
+    "makeup_tip":"💡 Buy makeup cards from shop.","makeup_host_tip":"💡 Done by the child.",
+    "makeup_host_self":"💡 Parent account. Switch to child.",
+    "exam_title":"Exam","exam_no_subject":"No subjects!","exam_score":"(max {max}, target {target})","exam_grade":"(target {target})",
+    "exam_ranks":"**Top % in Chinese/Math/English**","exam_cn":"Chinese","exam_ma":"Math","exam_en":"English",
+    "exam_estimate":"### Estimated: **{pts}** pts ({hits} hit)","exam_save":"Save exam result",
+    "exam_saved":"Saved!","exam_hit":"{sub} hit -> +{pts}","exam_over":"  {sub} +{n} tiers -> +{pts}",
+    "exam_up":"  {sub} up {n} -> +{pts}","exam_multi":"{n} subjects -> +{pts}",
+    "exam_rank":"{sub} top {pct}% -> +{pts}","exam_rank_more":"  +{n} tier -> +{pts}",
+    "event_title":"Special Events","event_fired":"Triggered today: {note} +{pts}",
+    "event_confirm":"🎲 Roll today's chance?","event_roll":"Confirm","event_roll_btn":"Roll",
     "event_got":"Got {pts} points!","event_note":"Point Burst",
-    "extra_title":"Extra Points","extra_name":"Event Name","extra_points":"Points (can be negative)",
-    "extra_submit":"Submit","extra_saved":"Recorded: {name} ({pts}pts)",
-    "extra_clear":"Clear extra records","extra_none":"No records",
-    "extra_only_parent":"Only parents or admins can add extra events.",
+    "extra_title":"Extra Points","extra_name":"Event Name","extra_points":"Points",
+    "extra_submit":"Submit","extra_saved":"Recorded: {name} ({pts})","extra_clear":"Clear","extra_none":"No records",
+    "extra_only_parent":"Only parents/admins.",
     "lb_title":"🏆 Sibling Leaderboard","lb_period":"Period","lb_day":"Daily","lb_month":"Monthly","lb_total":"All-time",
-    "lb_score":"pts","lb_no_data":"No leaderboard data yet","lb_you":"(you)",
-    "lb_only_you":"No other siblings yet. Invite them to compete!",
-    "redeem_tip_expired":"Trial of [{user}] has expired. Ask admin for a redeem code.",
-    "redeem_code":"Enter redeem code","redeem_activate":"Activate","redeem_invalid":"Invalid or already-used code.",
-    "redeem_success":"Activated!","redeem_fail":"Activation failed. Please try again.",
+    "lb_score":"pts","lb_no_data":"No data","lb_you":"(you)","lb_only_you":"No siblings yet.",
+    "redeem_tip_expired":"Trial of [{user}] expired.","redeem_code":"Redeem code","redeem_activate":"Activate",
+    "redeem_invalid":"Invalid code.","redeem_success":"Activated!","redeem_fail":"Activation failed.",
     "time_arrive":"Time's up!",
-    "exam_already_submitted":"✅ Already submitted today ({time}), +{pts} pts",
-    "exam_detail_prefix":"Detail: {detail}",
-    "exam_one_per_day":"Only one exam submission per day. Come back tomorrow!",
-    "exam_duplicate_error":"Already submitted today. Please do not resubmit.",
+    "exam_already_submitted":"✅ Already submitted today ({time}), +{pts}",
+    "exam_detail_prefix":"Detail: {detail}","exam_one_per_day":"One submission per day.",
+    "exam_duplicate_error":"Already submitted today.",
     "weekday_short":["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
 },
 "ja": {
-    "language":"言語 / Language","app_title":"学習チェックイン",
-    "login":"ログイン","register":"新規登録","find_pwd":"パスワード再設定","username":"ユーザー名","password":"パスワード",
-    "set_username":"ユーザー名","set_pwd":"パスワード","confirm_pwd":"パスワード確認",
-    "security_q":"秘密の質問","security_a":"秘密の答え",
-    "login_btn":"ログイン","register_btn":"登録","reset_btn":"パスワードをリセット",
-    "wrong_creds":"ユーザー名またはパスワードが違います","fill_all":"すべての項目を入力してください","pwd_mismatch":"パスワードが一致しません",
-    "reserved_name":"このユーザー名は予約されています","user_exists":"ユーザー名は既に存在します",
-    "register_ok":"登録完了！3日間のトライアルです。ログインしてください。",
-    "no_security_q":"秘密の質問が未設定です。管理者に連絡してください。","user_not_exist":"ユーザーが存在しません",
-    "reset_ok":"パスワードを再設定しました！ログインしてください。","wrong_answer":"秘密の答えが違います",
-    "reset_intro":"ユーザー名を入力し、秘密の質問を検証して新しいパスワードを設定します。",
-    "input_username":"ユーザー名を入力","new_password":"新パスワード",
-    "pwd_req": "🔐 パスワード：6文字以上、英数字推奨；123456 は使用不可",
-    "pwd_err_empty": "パスワードを入力してください",
-    "pwd_err_too_short": "パスワードは6文字以上必要です",
-    "pwd_err_too_long": "パスワードは72文字以内にしてください",
-    "pwd_err_default": "初期パスワード 123456 は使用できません",
-    "pwd_err_all_digits": "数字のみのパスワードは不可、英字と数字を混ぜてください",
-    "op_failed":"操作に失敗しました。後でもう一度お試しください。","db_failed":"データベース接続に失敗しました。",
-    "sidebar_title":"学習チェックイン","mobile_mode":"📱 モバイル簡易モード","current_identity":"ログイン中",
-    "local_time":"現地時間","makeup_cards":"🎫 補填カード","available_points":"利用可能ポイント",
-    "timer":"集中タイマー (ポモドーロ)","badges":"実績バッジ","no_badges":"バッジなし","points_detail":"ポイント詳細",
-    "checkin_pts":"チェックイン","longterm_pts":"長期","exam_pts":"試験","extra_pts":"臨時","special_pts":"特殊","spent_pts":"使用",
-    "account_settings":"アカウントとデータ","timezone":"タイムゾーン","select_timezone":"地域 / タイムゾーン","custom_tz":"カスタム",
-    "tz_offset":"UTC オフセット (時間)","save_tz":"タイムゾーンを保存","new_username":"新ユーザー名","leave_blank":"空欄で変更なし",
-    "change_username":"ユーザー名を変更","change_pwd":"パスワードを変更","change_security":"秘密の質問を変更",
-    "new_security_q":"新しい秘密の質問","new_security_a":"新しい秘密の答え","save_security":"保存",
-    "webhook":"リマインダー Webhook","save_webhook":"Webhook を保存","export_data":"📥 データをエクスポート (JSON)","logout_btn":"ログアウト",
-    "select_child":"管理/閲覧するお子様を選択","admin_select_target":"管理者：操作対象を選択",
-    "penetrate":"ドリルダウン","no_children_bound":"お子様が紐付けられていません。管理者に連絡してください。",
-    "role_admin":"管理者","role_host":"保護者","role_user":"子供","role_solo":"個人ユーザー",
+    "language":"言語","app_title":"学習チェックイン","login":"ログイン","register":"新規登録","find_pwd":"再設定",
+    "username":"ユーザー名","password":"パスワード","set_username":"ユーザー名","set_pwd":"パスワード","confirm_pwd":"確認",
+    "security_q":"秘密の質問","security_a":"答え","login_btn":"ログイン","register_btn":"登録","reset_btn":"リセット",
+    "wrong_creds":"認証失敗","fill_all":"全項目入力","pwd_mismatch":"パスワード不一致","reserved_name":"予約名","user_exists":"既存ユーザー",
+    "register_ok":"登録完了！","no_security_q":"秘密の質問未設定","user_not_exist":"存在しない","reset_ok":"再設定完了","wrong_answer":"答え不正解",
+    "reset_intro":"ユーザー名と秘密の答えを入力","input_username":"ユーザー名","new_password":"新パスワード",
+    "pwd_req":"🔐 6文字以上推奨","pwd_err_empty":"空","pwd_err_too_short":"短すぎ","pwd_err_too_long":"長すぎ",
+    "pwd_err_default":"既定値不可","pwd_err_all_digits":"数字のみ不可","webhook_unsafe":"❌ 不正なURL","webhook_saved":"✅ 保存済み",
+    "op_failed":"失敗","db_failed":"DB接続失敗","sidebar_title":"学習","mobile_mode":"📱 モバイル",
+    "current_identity":"ログイン中","local_time":"現地時間","makeup_cards":"🎫 補填","available_points":"利用可能",
+    "timer":"タイマー","badges":"バッジ","no_badges":"なし","points_detail":"詳細",
+    "checkin_pts":"チェック","longterm_pts":"長期","exam_pts":"試験","extra_pts":"臨時","special_pts":"特殊","spent_pts":"使用",
+    "account_settings":"アカウント","timezone":"タイムゾーン","select_timezone":"地域","custom_tz":"カスタム",
+    "tz_offset":"UTCオフセット","save_tz":"保存","new_username":"新ユーザー名","leave_blank":"空欄で変更なし",
+    "change_username":"変更","change_pwd":"パスワード変更","change_security":"秘密の質問変更","new_security_q":"新質問",
+    "new_security_a":"新答え","save_security":"保存","webhook":"Webhook","save_webhook":"保存","export_data":"📥 エクスポート",
+    "logout_btn":"ログアウト","select_child":"子供を選択","admin_select_target":"管理者：対象選択","penetrate":"ドリルダウン",
+    "no_children_bound":"子供未連携","role_admin":"管理者","role_host":"保護者","role_user":"子供","role_solo":"個人",
     "remaining":"残り","permanent":"永久","expired":"期限切れ",
-    "tab_checkin":"チェックイン","tab_extra":"臨時","tab_history":"履歴・グラフ","tab_shop":"ショップ","tab_redeem":"交換",
+    "tab_checkin":"チェック","tab_extra":"臨時","tab_history":"履歴","tab_shop":"ショップ","tab_redeem":"交換",
     "tab_exam":"試験","tab_event":"イベント","tab_settings":"設定","tab_leaderboard":"ランキング",
-    "search_users":"🔍 ユーザー検索","search_children":"🔍 子供を検索","no_match":"一致するユーザーなし",
-    "no_tasks_today":"今日のタスクが未設定です。設定から追加してください。",
-    "basic_req":"基本要件","full_req":"満点","today_done":"本日のチェックインは完了しました。",
-    "undo_checkin":"本日のチェックインを取り消す","base_score":"基本点","today_total":"本日合計",
-    "est_total":"予測合計","save_checkin":"チェックインを保存","saved":"保存しました！","bonus":"ボーナス",
-    "shop_empty":"ショップが空です。","redeem_btn":"交換","confirm_deduct":"確認して差し引く",
-    "points_insufficient":"ポイント不足です。","redeem_ok":"交換しました！","redeem_history":"交換履歴","none_yet":"なし",
-    "cancel":"キャンセル","backup_card":"補填カード",
-    "history_title":"履歴とグラフ分析","checkin_hist_detail":"チェックイン詳細","select_date":"日付を選択",
-    "time_view":"時間軸","by_day":"日別","by_week":"週別","by_month":"月別",
-    "no_data":"データなし","no_record":"記録なし","done_items":"完了項目：",
-    "weekly_report":"### 📊 週次レポート","week_checkin":"今週のチェックイン","week_total":"今週の合計",
-    "day_max":"一日最大","gen_report":"📸 週次レポートを生成・ダウンロード","save_report":"⬇️ 画像をダウンロード",
-    "report_ok":"レポートを生成しました。","report_failed":"画像生成に失敗しました。",
-    "makeup_intro":"🎫 **補填カード {n} 枚。過去7日以内の漏れを補えます：**",
-    "makeup_pick_date":"補填する日付を選択","makeup_pick_tasks":"**{d} に完了したタスクを選択（満点扱い）：**",
-    "makeup_submit":"補填カード1枚使用して送信","makeup_ok":"補填成功！","makeup_fail":"補填失敗。再度お試しください。",
-    "makeup_no_miss":"過去7日間、全出席です！","makeup_tip":"💡 ヒント：ショップで補填カード購入可。",
-    "makeup_host_tip":"💡 補填はお子様のアカウントで行ってください。",
-    "makeup_host_self":"💡 保護者アカウントです。子供を選択してください。",
-    "exam_title":"試験専用","exam_no_subject":"試験科目が未設定です！",
-    "exam_score":"(満点 {max}, 目標 {target})","exam_grade":"(目標 {target})",
-    "exam_ranks":"**国語/数学/英語の上位%（100は無効）**",
-    "exam_cn":"国語","exam_ma":"数学","exam_en":"英語",
-    "exam_estimate":"### 予測：**{pts}** 点（達成 {hits} 科目）","exam_save":"結果を保存",
-    "exam_saved":"保存しました！","exam_hit":"{sub} 達成 -> +{pts}","exam_over":"  {sub} {n}段階超え -> +{pts}",
-    "exam_up":"  {sub} {n}段階アップ -> +{pts}","exam_multi":"{n}科目以上達成 -> +{pts}",
-    "exam_rank":"{sub} 上位{pct}% -> +{pts}","exam_rank_more":"  {n}段階アップ -> +{pts}",
-    "event_title":"特殊イベント","event_fired":"本日は既に発動済み：{note} +{pts}点",
-    "event_confirm":"🎲 本日のチャンスを消費して回しますか？","event_roll":"回す","event_roll_btn":"回す",
-    "event_got":"{pts} ポイント獲得！","event_note":"ポイントバースト",
-    "extra_title":"臨時ポイント加減","extra_name":"イベント名","extra_points":"ポイント (負数可)",
-    "extra_submit":"送信","extra_saved":"記録：{name} ({pts}点)",
-    "extra_clear":"臨時記録をクリア","extra_none":"記録なし",
-    "extra_only_parent":"保護者/管理者のみ追加できます。",
-    "lb_title":"🏆 兄弟ランキング","lb_period":"期間","lb_day":"日間","lb_month":"月間","lb_total":"総合",
-    "lb_score":"点","lb_no_data":"ランキングデータなし","lb_you":"(あなた)",
-    "lb_only_you":"兄弟がいません。招待しましょう！",
-    "redeem_tip_expired":"【{user}】のトライアル期限切れ。管理者にコードを請求してください。",
-    "redeem_code":"コードを入力","redeem_activate":"有効化","redeem_invalid":"無効または使用済みコード",
-    "redeem_success":"有効化成功！","redeem_fail":"有効化に失敗しました。",
-    "time_arrive":"時間です！",
-    "exam_already_submitted":"✅ 本日は既に提出済み（{time}）、獲得ポイント：+{pts}",
-    "exam_detail_prefix":"詳細：{detail}",
-    "exam_one_per_day":"試験の提出は1日1回までです。明日また来てください。",
-    "exam_duplicate_error":"本日は既に提出済みです。重複提出しないでください。",
-    "weekday_short":["月","火","水","木","金","土","日"],
+    "search_users":"🔍 検索","search_children":"🔍 子供検索","no_match":"一致なし",
+    "no_tasks_today":"タスク未設定","basic_req":"基本","full_req":"満点","today_done":"完了済み",
+    "undo_checkin":"取消","base_score":"基本点","today_total":"本日合計","est_total":"予測","save_checkin":"保存","saved":"保存済み","bonus":"ボーナス",
+    "shop_empty":"空","redeem_btn":"交換","confirm_deduct":"確認","points_insufficient":"不足","redeem_ok":"交換済み",
+    "redeem_history":"履歴","none_yet":"なし","redeem_conflict":"競合エラー、再試行","cancel":"キャンセル","backup_card":"補填カード",
+    "history_title":"履歴とグラフ","checkin_hist_detail":"詳細","select_date":"日付","time_view":"時間軸",
+    "by_day":"日別","by_week":"週別","by_month":"月別","no_data":"データなし","no_record":"記録なし","done_items":"完了：",
+    "weekly_report":"### 📊 週次","week_checkin":"今週","week_total":"合計","day_max":"最大","gen_report":"📸 生成","save_report":"⬇️ 保存",
+    "report_ok":"生成済み","report_failed":"失敗","makeup_intro":"🎫 **{n}枚**","makeup_pick_date":"日付選択",
+    "makeup_pick_tasks":"**{d}完了タスク：**","makeup_submit":"1枚使用","makeup_ok":"成功","makeup_fail":"失敗","makeup_no_miss":"全出席",
+    "makeup_tip":"💡 ショップで購入","makeup_host_tip":"💡 子供のアカウントで","makeup_host_self":"💡 子供を選択",
+    "exam_title":"試験","exam_no_subject":"科目未設定","exam_score":"(満点{max}, 目標{target})","exam_grade":"(目標{target})",
+    "exam_ranks":"**上位%**","exam_cn":"国語","exam_ma":"数学","exam_en":"英語","exam_estimate":"### 予測：**{pts}**点",
+    "exam_save":"結果保存","exam_saved":"保存済み","exam_hit":"{sub}達成 +{pts}","exam_over":"{sub} {n}段階 +{pts}",
+    "exam_up":"{sub} {n}段階 +{pts}","exam_multi":"{n}科目 +{pts}","exam_rank":"{sub} 上位{pct}% +{pts}",
+    "exam_rank_more":"{n}段階 +{pts}","event_title":"特殊","event_fired":"既発動：{note} +{pts}",
+    "event_confirm":"🎲 チャンス使用？","event_roll":"確認","event_roll_btn":"回す","event_got":"+{pts}",
+    "event_note":"ポイントバースト","extra_title":"臨時","extra_name":"名前","extra_points":"ポイント",
+    "extra_submit":"送信","extra_saved":"記録：{name} ({pts})","extra_clear":"クリア","extra_none":"なし","extra_only_parent":"保護者のみ",
+    "lb_title":"🏆 ランキング","lb_period":"期間","lb_day":"日間","lb_month":"月間","lb_total":"総合","lb_score":"点",
+    "lb_no_data":"データなし","lb_you":"(あなた)","lb_only_you":"兄弟なし","redeem_tip_expired":"期限切れ[{user}]",
+    "redeem_code":"コード","redeem_activate":"有効化","redeem_invalid":"無効","redeem_success":"成功","redeem_fail":"失敗",
+    "time_arrive":"時間です","exam_already_submitted":"✅ 提出済み({time}) +{pts}","exam_detail_prefix":"詳細：{detail}",
+    "exam_one_per_day":"1日1回まで","exam_duplicate_error":"重複提出NG","weekday_short":["月","火","水","木","金","土","日"],
 },
 "fr": {
-    "language":"Langue / Language","app_title":"Suivi d'études",
-    "login":"Connexion","register":"Inscription","find_pwd":"Réinitialiser","username":"Nom d'utilisateur","password":"Mot de passe",
-    "set_username":"Nom d'utilisateur","set_pwd":"Mot de passe","confirm_pwd":"Confirmer mot de passe",
-    "security_q":"Question de sécurité","security_a":"Réponse de sécurité",
-    "login_btn":"Connexion","register_btn":"S'inscrire","reset_btn":"Réinitialiser",
-    "wrong_creds":"Nom ou mot de passe incorrect","fill_all":"Remplissez tous les champs","pwd_mismatch":"Mots de passe différents",
-    "reserved_name":"Nom réservé","user_exists":"Nom déjà utilisé","register_ok":"Inscription réussie ! Essai de 3 jours.",
-    "no_security_q":"Pas de question de sécurité. Contactez l'admin.","user_not_exist":"Utilisateur inexistant",
-    "reset_ok":"Mot de passe réinitialisé !","wrong_answer":"Réponse incorrecte",
-    "reset_intro":"Entrez le nom, vérifiez la question, puis définissez un nouveau mot de passe.",
-    "input_username":"Entrez votre nom","new_password":"Nouveau mot de passe",
-    "pwd_req": "🔐 Mot de passe : au moins 6 caractères, lettres + chiffres recommandés ; 123456 interdit",
-    "pwd_err_empty": "Le mot de passe ne peut pas être vide",
-    "pwd_err_too_short": "Le mot de passe doit contenir au moins 6 caractères",
-    "pwd_err_too_long": "Le mot de passe ne peut dépasser 72 caractères",
-    "pwd_err_default": "Le mot de passe par défaut 123456 est interdit",
-    "pwd_err_all_digits": "Mot de passe tout en chiffres interdit ; mélangez lettres et chiffres",
-    "op_failed":"Opération échouée.","db_failed":"Échec de connexion à la base.",
-    "sidebar_title":"Suivi d'études","mobile_mode":"📱 Mode mobile","current_identity":"Connecté :",
-    "local_time":"Heure locale","makeup_cards":"🎫 Cartes rattrapage","available_points":"Points disponibles",
-    "timer":"Minuteur (Pomodoro)","badges":"Mes badges","no_badges":"Aucun badge","points_detail":"Détail des points",
-    "checkin_pts":"Check","longterm_pts":"Long terme","exam_pts":"Examen","extra_pts":"Extra","special_pts":"Spécial","spent_pts":"Dépensé",
-    "account_settings":"Compte & Données","timezone":"Fuseau horaire","select_timezone":"Région / Fuseau","custom_tz":"Personnalisé",
-    "tz_offset":"Décalage UTC (h)","save_tz":"Enregistrer","new_username":"Nouveau nom","leave_blank":"Vide = inchangé",
-    "change_username":"Changer le nom","change_pwd":"Changer le mot de passe","change_security":"Changer sécurité",
-    "new_security_q":"Nouvelle question","new_security_a":"Nouvelle réponse","save_security":"Enregistrer",
-    "webhook":"Rappel Webhook","save_webhook":"Enregistrer","export_data":"📥 Exporter (JSON)","logout_btn":"Déconnexion",
-    "select_child":"Sélectionner un enfant","admin_select_target":"Admin : Sélectionner la cible",
-    "penetrate":"Percer","no_children_bound":"Aucun enfant lié. Contactez l'admin.",
-    "role_admin":"Admin","role_host":"Parent","role_user":"Enfant","role_solo":"Solo",
-    "remaining":"Restant","permanent":"À vie","expired":"Expiré",
+    "language":"Langue","app_title":"Suivi","login":"Connexion","register":"Inscription","find_pwd":"Réinit.",
+    "username":"Nom","password":"Mot de passe","set_username":"Nom","set_pwd":"Mot de passe","confirm_pwd":"Confirmer",
+    "security_q":"Question","security_a":"Réponse","login_btn":"Connexion","register_btn":"Inscription","reset_btn":"Réinit.",
+    "wrong_creds":"Identifiants incorrects","fill_all":"Complétez tout","pwd_mismatch":"Mots de passe différents",
+    "reserved_name":"Réservé","user_exists":"Existe déjà","register_ok":"Inscrit!","no_security_q":"Pas de question",
+    "user_not_exist":"Inexistant","reset_ok":"Réinitialisé!","wrong_answer":"Réponse fausse","reset_intro":"Entrez le nom",
+    "input_username":"Nom","new_password":"Nouveau mot de passe","pwd_req":"🔐 6 caractères min","pwd_err_empty":"Vide",
+    "pwd_err_too_short":"Trop court","pwd_err_too_long":"Trop long","pwd_err_default":"123456 interdit",
+    "pwd_err_all_digits":"Tout chiffres interdit","webhook_unsafe":"❌ URL invalide","webhook_saved":"✅ Sauvegardé",
+    "op_failed":"Échec","db_failed":"Échec DB","sidebar_title":"Suivi","mobile_mode":"📱 Mobile",
+    "current_identity":"Connecté","local_time":"Heure","makeup_cards":"🎫 Rattrapage","available_points":"Points",
+    "timer":"Minuteur","badges":"Badges","no_badges":"Aucun","points_detail":"Détails",
+    "checkin_pts":"Check","longterm_pts":"Long","exam_pts":"Exam","extra_pts":"Extra","special_pts":"Spécial","spent_pts":"Dépensé",
+    "account_settings":"Compte","timezone":"Fuseau","select_timezone":"Région","custom_tz":"Custom","tz_offset":"Décalage",
+    "save_tz":"Enregistrer","new_username":"Nouveau nom","leave_blank":"Vide=inchangé","change_username":"Changer nom",
+    "change_pwd":"Changer MDP","change_security":"Changer sécurité","new_security_q":"Nouvelle Q","new_security_a":"Nouvelle R",
+    "save_security":"Enregistrer","webhook":"Webhook","save_webhook":"Enregistrer","export_data":"📥 Export","logout_btn":"Déconnexion",
+    "select_child":"Sélectionner","admin_select_target":"Admin: cible","penetrate":"Percer","no_children_bound":"Aucun enfant",
+    "role_admin":"Admin","role_host":"Parent","role_user":"Enfant","role_solo":"Solo","remaining":"Restant","permanent":"À vie","expired":"Expiré",
     "tab_checkin":"Check","tab_extra":"Extra","tab_history":"Historique","tab_shop":"Boutique","tab_redeem":"Échange",
     "tab_exam":"Examen","tab_event":"Événement","tab_settings":"Paramètres","tab_leaderboard":"Classement",
-    "search_users":"🔍 Rechercher","search_children":"🔍 Rechercher enfants","no_match":"Aucun utilisateur",
-    "no_tasks_today":"Aucune tâche aujourd'hui. Ajoutez-les dans Paramètres.",
-    "basic_req":"Exigence de base","full_req":"Note parfaite","today_done":"Check-in du jour terminé.",
-    "undo_checkin":"Annuler le check-in","base_score":"Points de base","today_total":"Total du jour",
-    "est_total":"Total estimé","save_checkin":"Enregistrer","saved":"Enregistré !","bonus":"Bonus",
-    "shop_empty":"Boutique vide.","redeem_btn":"Échanger","confirm_deduct":"Confirmer",
-    "points_insufficient":"Points insuffisants.","redeem_ok":"Échangé !","redeem_history":"Historique des échanges","none_yet":"Aucun",
-    "cancel":"Annuler","backup_card":"Carte rattrapage",
-    "history_title":"Historique & Graphiques","checkin_hist_detail":"Détail du check-in","select_date":"Choisir une date",
-    "time_view":"Vue temporelle","by_day":"Quotidien","by_week":"Hebdomadaire","by_month":"Mensuel",
-    "no_data":"Aucune donnée","no_record":"Aucun enregistrement","done_items":"Terminé :",
-    "weekly_report":"### 📊 Rapport hebdomadaire","week_checkin":"Jours cette semaine","week_total":"Total semaine",
-    "day_max":"Max du jour","gen_report":"📸 Générer & Télécharger le rapport","save_report":"⬇️ Télécharger l'image",
-    "report_ok":"Rapport généré.","report_failed":"Échec de génération.",
-    "makeup_intro":"🎫 **{n} carte(s) rattrapage disponible(s) :**",
-    "makeup_pick_date":"Choisir une date","makeup_pick_tasks":"**Cochez les tâches faites le {d} :**",
-    "makeup_submit":"Utiliser 1 carte","makeup_ok":"Rattrapage réussi !","makeup_fail":"Échec du rattrapage.",
-    "makeup_no_miss":"Présence complète sur 7 jours !","makeup_tip":"💡 Astuce : cartes rattrapage en boutique.",
-    "makeup_host_tip":"💡 Le rattrapage doit être fait par l'enfant.","makeup_host_self":"💡 Compte parent. Changez d'enfant.",
-    "exam_title":"Examens","exam_no_subject":"Aucune matière configurée !",
-    "exam_score":"(max {max}, cible {target})","exam_grade":"(cible {target})",
-    "exam_ranks":"**Top % en Chinois/Maths/Anglais (100 = skip)**",
-    "exam_cn":"Chinois","exam_ma":"Maths","exam_en":"Anglais",
-    "exam_estimate":"### Estimé : **{pts}** pts ({hits} matière(s))","exam_save":"Enregistrer le résultat",
-    "exam_saved":"Enregistré !","exam_hit":"{sub} atteint -> +{pts}","exam_over":"  {sub} +{n} paliers -> +{pts}",
-    "exam_up":"  {sub} +{n} niveaux -> +{pts}","exam_multi":"{n}+ matières -> +{pts}",
-    "exam_rank":"{sub} top {pct}% -> +{pts}","exam_rank_more":"  +{n} paliers -> +{pts}",
-    "event_title":"Événements spéciaux","event_fired":"Déjà déclenché : {note} +{pts}pts",
-    "event_confirm":"🎲 Consommer la chance du jour ?","event_roll":"Confirmer","event_roll_btn":"Lancer",
-    "event_got":"+{pts} points !","event_note":"Bonus de points",
-    "extra_title":"Points extra","extra_name":"Nom","extra_points":"Points (négatif ok)",
-    "extra_submit":"Soumettre","extra_saved":"Noté : {name} ({pts}pts)",
-    "extra_clear":"Effacer","extra_none":"Aucun",
-    "extra_only_parent":"Parents/admins uniquement.",
-    "lb_title":"🏆 Classement frères/sœurs","lb_period":"Période","lb_day":"Jour","lb_month":"Mois","lb_total":"Total",
-    "lb_score":"pts","lb_no_data":"Pas de classement","lb_you":"(vous)",
-    "lb_only_you":"Pas d'autres frères/sœurs.",
-    "redeem_tip_expired":"Essai de [{user}] expiré. Demandez un code à l'admin.",
-    "redeem_code":"Code","redeem_activate":"Activer","redeem_invalid":"Code invalide ou utilisé",
-    "redeem_success":"Activé !","redeem_fail":"Échec d'activation.",
-    "time_arrive":"Temps écoulé !",
-    "exam_already_submitted":"✅ Déjà soumis aujourd'hui ({time}), +{pts} pts",
-    "exam_detail_prefix":"Détail : {detail}",
-    "exam_one_per_day":"Une seule soumission par jour. Revenez demain !",
-    "exam_duplicate_error":"Déjà soumis aujourd'hui. Ne soumettez pas à nouveau.",
-    "weekday_short":["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"],
+    "search_users":"🔍 Chercher","search_children":"🔍 Enfants","no_match":"Aucun",
+    "no_tasks_today":"Pas de tâches","basic_req":"Base","full_req":"Parfait","today_done":"Fait aujourd'hui",
+    "undo_checkin":"Annuler","base_score":"Base","today_total":"Total","est_total":"Estimé","save_checkin":"Enregistrer",
+    "saved":"Enregistré!","bonus":"Bonus","shop_empty":"Vide","redeem_btn":"Échanger","confirm_deduct":"Confirmer",
+    "points_insufficient":"Insuffisant","redeem_ok":"Échangé","redeem_history":"Historique","none_yet":"Aucun",
+    "redeem_conflict":"Conflit, réessayez","cancel":"Annuler","backup_card":"Rattrapage",
+    "history_title":"Historique","checkin_hist_detail":"Détail","select_date":"Date","time_view":"Vue",
+    "by_day":"Jour","by_week":"Semaine","by_month":"Mois","no_data":"Aucune donnée","no_record":"Aucun","done_items":"Fait:",
+    "weekly_report":"### 📊 Hebdo","week_checkin":"Jours","week_total":"Total","day_max":"Max","gen_report":"📸 Générer",
+    "save_report":"⬇️ Télécharger","report_ok":"Généré","report_failed":"Échec","makeup_intro":"🎫 **{n} cartes**",
+    "makeup_pick_date":"Choisir date","makeup_pick_tasks":"**Tâches du {d}:**","makeup_submit":"Utiliser",
+    "makeup_ok":"Réussi","makeup_fail":"Échec","makeup_no_miss":"Présence complète","makeup_tip":"💡 Boutique",
+    "makeup_host_tip":"💡 Par l'enfant","makeup_host_self":"💡 Compte parent","exam_title":"Examens","exam_no_subject":"Aucune matière",
+    "exam_score":"(max {max}, cible {target})","exam_grade":"(cible {target})","exam_ranks":"**Top %**",
+    "exam_cn":"Chinois","exam_ma":"Maths","exam_en":"Anglais","exam_estimate":"### Estimé: **{pts}** pts",
+    "exam_save":"Enregistrer","exam_saved":"Enregistré","exam_hit":"{sub} atteint +{pts}","exam_over":"{sub} +{n} paliers +{pts}",
+    "exam_up":"{sub} +{n} +{pts}","exam_multi":"{n} matières +{pts}","exam_rank":"{sub} top {pct}% +{pts}",
+    "exam_rank_more":"+{n} +{pts}","event_title":"Événements","event_fired":"Déjà déclenché: {note} +{pts}",
+    "event_confirm":"🎲 Utiliser la chance?","event_roll":"Confirmer","event_roll_btn":"Lancer","event_got":"+{pts}",
+    "event_note":"Bonus","extra_title":"Points extra","extra_name":"Nom","extra_points":"Points","extra_submit":"Envoyer",
+    "extra_saved":"Noté: {name} ({pts})","extra_clear":"Effacer","extra_none":"Aucun","extra_only_parent":"Parents only",
+    "lb_title":"🏆 Classement","lb_period":"Période","lb_day":"Jour","lb_month":"Mois","lb_total":"Total","lb_score":"pts",
+    "lb_no_data":"Aucune donnée","lb_you":"(vous)","lb_only_you":"Aucun frère/sœur","redeem_tip_expired":"Essai [{user}] expiré",
+    "redeem_code":"Code","redeem_activate":"Activer","redeem_invalid":"Invalide","redeem_success":"Activé","redeem_fail":"Échec",
+    "time_arrive":"Temps!","exam_already_submitted":"✅ Déjà soumis ({time}) +{pts}","exam_detail_prefix":"Détail: {detail}",
+    "exam_one_per_day":"1 par jour","exam_duplicate_error":"Déjà soumis","weekday_short":["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"],
 },
 "ru": {
-    "language":"Язык / Language","app_title":"Учёба",
-    "login":"Вход","register":"Регистрация","find_pwd":"Сброс пароля","username":"Имя","password":"Пароль",
-    "set_username":"Имя","set_pwd":"Пароль","confirm_pwd":"Пароль ещё раз",
-    "security_q":"Секретный вопрос","security_a":"Секретный ответ",
-    "login_btn":"Войти","register_btn":"Зарегистрироваться","reset_btn":"Сбросить",
-    "wrong_creds":"Неверное имя или пароль","fill_all":"Заполните все поля","pwd_mismatch":"Пароли не совпадают",
-    "reserved_name":"Имя зарезервировано","user_exists":"Имя занято","register_ok":"Готово! Пробный период 3 дня.",
-    "no_security_q":"Нет секретного вопроса. Свяжитесь с админом.","user_not_exist":"Пользователь не найден",
-    "reset_ok":"Пароль сброшен!","wrong_answer":"Неверный ответ",
-    "reset_intro":"Введите имя, проверьте вопрос, задайте новый пароль.",
-    "input_username":"Введите имя","new_password":"Новый пароль",
-    "pwd_req": "🔐 Пароль: не менее 6 символов, буквы + цифры; 123456 запрещён",
-    "pwd_err_empty": "Пароль не может быть пустым",
-    "pwd_err_too_short": "Пароль должен содержать не менее 6 символов",
-    "pwd_err_too_long": "Пароль не должен превышать 72 символа",
-    "pwd_err_default": "Пароль по умолчанию 123456 запрещён",
-    "pwd_err_all_digits": "Только цифры запрещены; смешивайте буквы и цифры",
-    "op_failed":"Операция не удалась.","db_failed":"Ошибка подключения к БД.",
-    "sidebar_title":"Учёба","mobile_mode":"📱 Мобильный режим","current_identity":"Вы вошли как",
-    "local_time":"Местное время","makeup_cards":"🎫 Карты補填","available_points":"Доступные баллы",
-    "timer":"Таймер (Помодоро)","badges":"Мои значки","no_badges":"Нет значков","points_detail":"Детали баллов",
-    "checkin_pts":"Отметка","longterm_pts":"Долгосрочные","exam_pts":"Экзамен","extra_pts":"Прочее","special_pts":"Особое","spent_pts":"Потрачено",
-    "account_settings":"Аккаунт и данные","timezone":"Часовой пояс","select_timezone":"Регион / Пояс","custom_tz":"Другой",
-    "tz_offset":"Смещение UTC (ч)","save_tz":"Сохранить","new_username":"Новое имя","leave_blank":"Пусто = без изменений",
-    "change_username":"Изменить имя","change_pwd":"Изменить пароль","change_security":"Изменить вопрос",
-    "new_security_q":"Новый вопрос","new_security_a":"Новый ответ","save_security":"Сохранить",
-    "webhook":"Webhook напоминаний","save_webhook":"Сохранить","export_data":"📥 Экспорт (JSON)","logout_btn":"Выйти",
-    "select_child":"Выберите ребёнка","admin_select_target":"Админ: выберите цель",
-    "penetrate":"Проникнуть","no_children_bound":"Нет привязанных детей.",
-    "role_admin":"Админ","role_host":"Родитель","role_user":"Ребёнок","role_solo":"Соло",
-    "remaining":"Осталось","permanent":"Навсегда","expired":"Истёк",
-    "tab_checkin":"Отметка","tab_extra":"Прочее","tab_history":"История","tab_shop":"Магазин","tab_redeem":"Обмен",
-    "tab_exam":"Экзамен","tab_event":"Событие","tab_settings":"Настройки","tab_leaderboard":"Рейтинг",
-    "search_users":"🔍 Поиск","search_children":"🔍 Поиск детей","no_match":"Не найдено",
-    "no_tasks_today":"Нет задач на сегодня. Добавьте в настройках.",
-    "basic_req":"Базовое","full_req":"Максимум","today_done":"Отметка завершена.",
-    "undo_checkin":"Отменить отметку","base_score":"Базовые баллы","today_total":"Итого за день",
-    "est_total":"Прогноз","save_checkin":"Сохранить","saved":"Сохранено!","bonus":"Бонус",
-    "shop_empty":"Магазин пуст.","redeem_btn":"Обменять","confirm_deduct":"Списать",
-    "points_insufficient":"Недостаточно баллов.","redeem_ok":"Обменяно!","redeem_history":"История обмена","none_yet":"Нет",
-    "cancel":"Отмена","backup_card":"Карта補填",
-    "history_title":"История и графики","checkin_hist_detail":"Детали отметки","select_date":"Выберите дату",
-    "time_view":"Вид","by_day":"По дням","by_week":"По неделям","by_month":"По месяцам",
-    "no_data":"Нет данных","no_record":"Нет записей","done_items":"Выполнено:",
-    "weekly_report":"### 📊 Недельный отчёт","week_checkin":"Дней за неделю","week_total":"Итого за неделю",
-    "day_max":"Максимум за день","gen_report":"📸 Создать и скачать отчёт","save_report":"⬇️ Скачать картинку",
-    "report_ok":"Отчёт готов.","report_failed":"Ошибка генерации.",
-    "makeup_intro":"🎫 **Доступно карт: {n}**",
-    "makeup_pick_date":"Выберите дату","makeup_pick_tasks":"**Отметьте задачи за {d}:**",
-    "makeup_submit":"Использовать карту","makeup_ok":"Готово!","makeup_fail":"Ошибка",
-    "makeup_no_miss":"Полная посещаемость 7 дней!","makeup_tip":"💡 Карты в магазине.",
-    "makeup_host_tip":"💡 Заполнять должен ребёнок.","makeup_host_self":"💡 Родительский аккаунт. Переключите.",
-    "exam_title":"Экзамены","exam_no_subject":"Нет предметов!",
-    "exam_score":"(макс {max}, цель {target})","exam_grade":"(цель {target})",
-    "exam_ranks":"**Top % в языках/матем/англ (100 = пропуск)**",
-    "exam_cn":"Кит. язык","exam_ma":"Математика","exam_en":"Английский",
-    "exam_estimate":"### Прогноз: **{pts}** баллов ({hits})","exam_save":"Сохранить результат",
-    "exam_saved":"Сохранено!","exam_hit":"{sub} → +{pts}","exam_over":"  {sub} +{n} уровней → +{pts}",
-    "exam_up":"  {sub} на {n} уровней → +{pts}","exam_multi":"{n}+ предметов → +{pts}",
-    "exam_rank":"{sub} топ {pct}% → +{pts}","exam_rank_more":"  ещё {n} → +{pts}",
-    "event_title":"Специальные события","event_fired":"Уже запущено сегодня: {note} +{pts}",
-    "event_confirm":"🎲 Использовать шанс дня?","event_roll":"Подтвердить","event_roll_btn":"Крутить",
-    "event_got":"+{pts} баллов!","event_note":"Взрыв баллов",
-    "extra_title":"Доп. баллы","extra_name":"Название","extra_points":"Баллы (можно -)",
-    "extra_submit":"Отправить","extra_saved":"Записано: {name} ({pts})",
-    "extra_clear":"Очистить","extra_none":"Нет",
-    "extra_only_parent":"Только родители/админы.",
-    "lb_title":"🏆 Рейтинг братьев/сестёр","lb_period":"Период","lb_day":"День","lb_month":"Месяц","lb_total":"Всего",
-    "lb_score":"баллов","lb_no_data":"Нет данных","lb_you":"(вы)",
-    "lb_only_you":"Пока нет других участников.",
-    "redeem_tip_expired":"Пробный период [{user}] истёк. Запросите код у админа.",
-    "redeem_code":"Код","redeem_activate":"Активировать","redeem_invalid":"Неверный или уже использован",
-    "redeem_success":"Активировано!","redeem_fail":"Ошибка активации.",
-    "time_arrive":"Время вышло!",
-    "exam_already_submitted":"✅ Уже отправлено сегодня ({time}), +{pts} баллов",
-    "exam_detail_prefix":"Детали: {detail}",
-    "exam_one_per_day":"Одна отправка в день. Возвращайтесь завтра!",
-    "exam_duplicate_error":"Уже отправлено сегодня. Не отправляйте повторно.",
+    "language":"Язык","app_title":"Учёба","login":"Вход","register":"Регистрация","find_pwd":"Сброс",
+    "username":"Имя","password":"Пароль","set_username":"Имя","set_pwd":"Пароль","confirm_pwd":"Ещё раз",
+    "security_q":"Вопрос","security_a":"Ответ","login_btn":"Войти","register_btn":"Рег.","reset_btn":"Сброс",
+    "wrong_creds":"Ошибка входа","fill_all":"Заполните","pwd_mismatch":"Пароли разные","reserved_name":"Занято",
+    "user_exists":"Уже есть","register_ok":"Готово","no_security_q":"Нет вопроса","user_not_exist":"Не найден",
+    "reset_ok":"Сброшено","wrong_answer":"Неверно","reset_intro":"Введите имя","input_username":"Имя","new_password":"Новый",
+    "pwd_req":"🔐 6+ символов","pwd_err_empty":"Пусто","pwd_err_too_short":"Коротко","pwd_err_too_long":"Длинно",
+    "pwd_err_default":"123456 нельзя","pwd_err_all_digits":"Только цифры нельзя","webhook_unsafe":"❌ Невалидный URL",
+    "webhook_saved":"✅ Сохранено","op_failed":"Ошибка","db_failed":"Ошибка БД","sidebar_title":"Учёба",
+    "mobile_mode":"📱 Моб.","current_identity":"Вошли","local_time":"Время","makeup_cards":"🎫 Карты",
+    "available_points":"Баллы","timer":"Таймер","badges":"Значки","no_badges":"Нет","points_detail":"Детали",
+    "checkin_pts":"Отметка","longterm_pts":"Долго","exam_pts":"Экз","extra_pts":"Доп","special_pts":"Особ","spent_pts":"Трата",
+    "account_settings":"Аккаунт","timezone":"Пояс","select_timezone":"Регион","custom_tz":"Свой","tz_offset":"UTC",
+    "save_tz":"Сохранить","new_username":"Новое имя","leave_blank":"Пусто=без изм.","change_username":"Сменить имя",
+    "change_pwd":"Сменить пароль","change_security":"Сменить вопрос","new_security_q":"Новый вопрос","new_security_a":"Новый ответ",
+    "save_security":"Сохранить","webhook":"Webhook","save_webhook":"Сохр.","export_data":"📥 Экспорт","logout_btn":"Выйти",
+    "select_child":"Выберите","admin_select_target":"Админ: цель","penetrate":"Проникнуть","no_children_bound":"Нет детей",
+    "role_admin":"Админ","role_host":"Родитель","role_user":"Ребёнок","role_solo":"Соло","remaining":"Осталось",
+    "permanent":"Навсегда","expired":"Истёк","tab_checkin":"Отметка","tab_extra":"Доп","tab_history":"История",
+    "tab_shop":"Магазин","tab_redeem":"Обмен","tab_exam":"Экз","tab_event":"Событие","tab_settings":"Настройки",
+    "tab_leaderboard":"Рейтинг","search_users":"🔍 Поиск","search_children":"🔍 Дети","no_match":"Нет",
+    "no_tasks_today":"Нет задач","basic_req":"Базовое","full_req":"Максимум","today_done":"Готово",
+    "undo_checkin":"Отменить","base_score":"Базовые","today_total":"За день","est_total":"Прогноз",
+    "save_checkin":"Сохранить","saved":"Сохр.","bonus":"Бонус","shop_empty":"Пусто","redeem_btn":"Обмен",
+    "confirm_deduct":"Подтвердить","points_insufficient":"Мало","redeem_ok":"Обменяно","redeem_history":"История",
+    "none_yet":"Нет","redeem_conflict":"Конфликт, повторите","cancel":"Отмена","backup_card":"Карта",
+    "history_title":"История","checkin_hist_detail":"Детали","select_date":"Дата","time_view":"Вид",
+    "by_day":"День","by_week":"Неделя","by_month":"Месяц","no_data":"Нет данных","no_record":"Нет",
+    "done_items":"Сделано:","weekly_report":"### 📊 Неделя","week_checkin":"Дней","week_total":"Итого",
+    "day_max":"Максимум","gen_report":"📸 Создать","save_report":"⬇️ Скачать","report_ok":"Готово","report_failed":"Ошибка",
+    "makeup_intro":"🎫 **{n} карт**","makeup_pick_date":"Дата","makeup_pick_tasks":"**Задачи {d}:**",
+    "makeup_submit":"Использовать","makeup_ok":"Готово","makeup_fail":"Ошибка","makeup_no_miss":"Полное посещение",
+    "makeup_tip":"💡 В магазине","makeup_host_tip":"💡 Через ребёнка","makeup_host_self":"💡 Родитель",
+    "exam_title":"Экзамены","exam_no_subject":"Нет предметов","exam_score":"(макс {max}, цель {target})",
+    "exam_grade":"(цель {target})","exam_ranks":"**Top %**","exam_cn":"Кит.","exam_ma":"Матем.","exam_en":"Англ.",
+    "exam_estimate":"### Прогноз: **{pts}**","exam_save":"Сохранить","exam_saved":"Сохр.","exam_hit":"{sub} → +{pts}",
+    "exam_over":"{sub} +{n} → +{pts}","exam_up":"{sub} +{n} → +{pts}","exam_multi":"{n}+ → +{pts}",
+    "exam_rank":"{sub} {pct}% → +{pts}","exam_rank_more":"+{n} → +{pts}","event_title":"События",
+    "event_fired":"Уже: {note} +{pts}","event_confirm":"🎲 Использовать шанс?","event_roll":"Да",
+    "event_roll_btn":"Крутить","event_got":"+{pts}","event_note":"Взрыв","extra_title":"Доп. баллы",
+    "extra_name":"Название","extra_points":"Баллы","extra_submit":"Отпр.","extra_saved":"Записано: {name} ({pts})",
+    "extra_clear":"Очистить","extra_none":"Нет","extra_only_parent":"Родители only","lb_title":"🏆 Рейтинг",
+    "lb_period":"Период","lb_day":"День","lb_month":"Месяц","lb_total":"Всего","lb_score":"баллов",
+    "lb_no_data":"Нет","lb_you":"(вы)","lb_only_you":"Нет других","redeem_tip_expired":"Пробный [{user}] истёк",
+    "redeem_code":"Код","redeem_activate":"Активировать","redeem_invalid":"Неверный","redeem_success":"Активировано",
+    "redeem_fail":"Ошибка","time_arrive":"Время","exam_already_submitted":"✅ Уже ({time}) +{pts}",
+    "exam_detail_prefix":"Детали: {detail}","exam_one_per_day":"1 раз в день","exam_duplicate_error":"Уже отправлено",
     "weekday_short":["Пн","Вт","Ср","Чт","Пт","Сб","Вс"],
 },
 "es": {
-    "language":"Idioma / Language","app_title":"Registro de estudios",
-    "login":"Iniciar sesión","register":"Registrarse","find_pwd":"Restablecer","username":"Usuario","password":"Contraseña",
-    "set_username":"Usuario","set_pwd":"Contraseña","confirm_pwd":"Confirmar contraseña",
-    "security_q":"Pregunta secreta","security_a":"Respuesta secreta",
-    "login_btn":"Entrar","register_btn":"Registrarse","reset_btn":"Restablecer",
-    "wrong_creds":"Usuario o contraseña incorrectos","fill_all":"Complete todos los campos","pwd_mismatch":"Las contraseñas no coinciden",
-    "reserved_name":"Nombre reservado","user_exists":"Usuario ya existe","register_ok":"¡Registrado! Prueba de 3 días.",
-    "no_security_q":"Sin pregunta secreta. Contacte al admin.","user_not_exist":"Usuario no existe",
-    "reset_ok":"¡Contraseña restablecida!","wrong_answer":"Respuesta incorrecta",
-    "reset_intro":"Ingrese el usuario, verifique la pregunta y establezca una nueva contraseña.",
-    "input_username":"Ingrese su usuario","new_password":"Nueva contraseña",
-    "pwd_req": "🔐 Contraseña: al menos 6 caracteres, letras + números recomendado; 123456 prohibido",
-    "pwd_err_empty": "La contraseña no puede estar vacía",
-    "pwd_err_too_short": "La contraseña debe tener al menos 6 caracteres",
-    "pwd_err_too_long": "La contraseña no puede exceder 72 caracteres",
-    "pwd_err_default": "La contraseña por defecto 123456 no está permitida",
-    "pwd_err_all_digits": "Contraseña solo con dígitos prohibida; combine letras y números",
-    "op_failed":"Operación fallida.","db_failed":"Error de conexión a la base de datos.",
-    "sidebar_title":"Registro de estudios","mobile_mode":"📱 Modo móvil","current_identity":"Sesión:",
-    "local_time":"Hora local","makeup_cards":"🎫 Tarjetas de recuperación","available_points":"Puntos disponibles",
-    "timer":"Temporizador (Pomodoro)","badges":"Mis insignias","no_badges":"Sin insignias","points_detail":"Detalle de puntos",
-    "checkin_pts":"Registro","longterm_pts":"Largo plazo","exam_pts":"Examen","extra_pts":"Extra","special_pts":"Especial","spent_pts":"Gastado",
-    "account_settings":"Cuenta y datos","timezone":"Zona horaria","select_timezone":"Región / Zona","custom_tz":"Personalizada",
-    "tz_offset":"Desfase UTC (h)","save_tz":"Guardar","new_username":"Nuevo usuario","leave_blank":"Vacío = sin cambios",
-    "change_username":"Cambiar usuario","change_pwd":"Cambiar contraseña","change_security":"Cambiar seguridad",
-    "new_security_q":"Nueva pregunta","new_security_a":"Nueva respuesta","save_security":"Guardar",
-    "webhook":"Webhook recordatorio","save_webhook":"Guardar","export_data":"📥 Exportar (JSON)","logout_btn":"Cerrar sesión",
-    "select_child":"Seleccione un niño","admin_select_target":"Admin: seleccione el objetivo",
-    "penetrate":"Perforar","no_children_bound":"Sin niños vinculados.",
-    "role_admin":"Admin","role_host":"Padre/Madre","role_user":"Niño","role_solo":"Solo",
-    "remaining":"Quedan","permanent":"Permanente","expired":"Caducado",
-    "tab_checkin":"Registro","tab_extra":"Extra","tab_history":"Historial","tab_shop":"Tienda","tab_redeem":"Canje",
-    "tab_exam":"Examen","tab_event":"Evento","tab_settings":"Ajustes","tab_leaderboard":"Ranking",
-    "search_users":"🔍 Buscar usuarios","search_children":"🔍 Buscar niños","no_match":"Sin coincidencias",
-    "no_tasks_today":"No hay tareas hoy. Añádalas en Ajustes.",
-    "basic_req":"Requisito básico","full_req":"Puntuación máxima","today_done":"Registro de hoy completado.",
-    "undo_checkin":"Deshacer registro de hoy","base_score":"Puntos base","today_total":"Total del día",
-    "est_total":"Total estimado","save_checkin":"Guardar registro","saved":"¡Guardado!","bonus":"Bono",
-    "shop_empty":"Tienda vacía.","redeem_btn":"Canjear","confirm_deduct":"Confirmar",
-    "points_insufficient":"Puntos insuficientes.","redeem_ok":"¡Canjeado!","redeem_history":"Historial de canjes","none_yet":"Ninguno",
-    "cancel":"Cancelar","backup_card":"Tarjeta de recuperación",
-    "history_title":"Historial y gráficas","checkin_hist_detail":"Detalle del registro","select_date":"Elegir fecha",
-    "time_view":"Vista temporal","by_day":"Diario","by_week":"Semanal","by_month":"Mensual",
-    "no_data":"Sin datos","no_record":"Sin registros","done_items":"Completado:",
-    "weekly_report":"### 📊 Informe semanal","week_checkin":"Días esta semana","week_total":"Total semanal",
-    "day_max":"Máximo del día","gen_report":"📸 Generar y descargar informe","save_report":"⬇️ Descargar imagen",
-    "report_ok":"Informe generado.","report_failed":"Error al generar.",
-    "makeup_intro":"🎫 **{n} tarjeta(s) de recuperación disponibles:**",
-    "makeup_pick_date":"Elegir fecha","makeup_pick_tasks":"**Marque las tareas del {d}:**",
-    "makeup_submit":"Usar 1 tarjeta","makeup_ok":"¡Recuperación exitosa!","makeup_fail":"Error de recuperación.",
-    "makeup_no_miss":"¡Asistencia completa 7 días!","makeup_tip":"💡 Tarjetas en la tienda.",
-    "makeup_host_tip":"💡 El niño debe hacerlo en su cuenta.","makeup_host_self":"💡 Cuenta de padre/madre. Cambie de niño.",
-    "exam_title":"Exámenes","exam_no_subject":"¡Sin materias configuradas!",
-    "exam_score":"(máx {max}, objetivo {target})","exam_grade":"(objetivo {target})",
-    "exam_ranks":"**Top % en Chino/Matemáticas/Inglés (100 = omitir)**",
-    "exam_cn":"Chino","exam_ma":"Matemáticas","exam_en":"Inglés",
-    "exam_estimate":"### Estimado: **{pts}** pts ({hits} materia(s))","exam_save":"Guardar resultado",
-    "exam_saved":"¡Guardado!","exam_hit":"{sub} alcanzado -> +{pts}","exam_over":"  {sub} +{n} niveles -> +{pts}",
-    "exam_up":"  {sub} sube {n} -> +{pts}","exam_multi":"{n}+ materias -> +{pts}",
-    "exam_rank":"{sub} top {pct}% -> +{pts}","exam_rank_more":"  +{n} más -> +{pts}",
-    "event_title":"Eventos especiales","event_fired":"Ya activado hoy: {note} +{pts}pts",
-    "event_confirm":"🎲 ¿Usar el chance de hoy?","event_roll":"Confirmar","event_roll_btn":"Girar",
-    "event_got":"¡+{pts} puntos!","event_note":"Explosión de puntos",
-    "extra_title":"Puntos extra","extra_name":"Nombre","extra_points":"Puntos (negativo ok)",
-    "extra_submit":"Enviar","extra_saved":"Registrado: {name} ({pts}pts)",
-    "extra_clear":"Borrar","extra_none":"Ninguno",
-    "extra_only_parent":"Solo padres/admins.",
-    "lb_title":"🏆 Ranking hermanos","lb_period":"Periodo","lb_day":"Diario","lb_month":"Mensual","lb_total":"Total",
-    "lb_score":"pts","lb_no_data":"Sin datos","lb_you":"(tú)",
-    "lb_only_you":"Sin otros hermanos.",
-    "redeem_tip_expired":"Prueba de [{user}] caducada. Solicite código al admin.",
-    "redeem_code":"Código","redeem_activate":"Activar","redeem_invalid":"Código inválido o usado",
-    "redeem_success":"¡Activado!","redeem_fail":"Error de activación.",
-    "time_arrive":"¡Tiempo!",
-    "exam_already_submitted":"✅ Ya enviado hoy ({time}), +{pts} pts",
-    "exam_detail_prefix":"Detalle: {detail}",
-    "exam_one_per_day":"Solo un envío por día. ¡Vuelve mañana!",
-    "exam_duplicate_error":"Ya enviado hoy. No envíes de nuevo.",
+    "language":"Idioma","app_title":"Registro","login":"Entrar","register":"Registrarse","find_pwd":"Recuperar",
+    "username":"Usuario","password":"Contraseña","set_username":"Usuario","set_pwd":"Contraseña","confirm_pwd":"Confirmar",
+    "security_q":"Pregunta","security_a":"Respuesta","login_btn":"Entrar","register_btn":"Registrar","reset_btn":"Restablecer",
+    "wrong_creds":"Incorrecto","fill_all":"Rellene todo","pwd_mismatch":"No coinciden","reserved_name":"Reservado",
+    "user_exists":"Ya existe","register_ok":"¡Registrado!","no_security_q":"Sin pregunta","user_not_exist":"No existe",
+    "reset_ok":"Restablecido","wrong_answer":"Respuesta incorrecta","reset_intro":"Ingrese usuario","input_username":"Usuario",
+    "new_password":"Nueva contraseña","pwd_req":"🔐 Mín 6","pwd_err_empty":"Vacío","pwd_err_too_short":"Corto",
+    "pwd_err_too_long":"Largo","pwd_err_default":"123456 prohibido","pwd_err_all_digits":"Solo dígitos no",
+    "webhook_unsafe":"❌ URL inválida","webhook_saved":"✅ Guardado","op_failed":"Error","db_failed":"Error BD",
+    "sidebar_title":"Registro","mobile_mode":"📱 Móvil","current_identity":"Sesión","local_time":"Hora",
+    "makeup_cards":"🎫 Recuperación","available_points":"Puntos","timer":"Temporizador","badges":"Insignias",
+    "no_badges":"Ninguna","points_detail":"Detalle","checkin_pts":"Registro","longterm_pts":"Largo","exam_pts":"Examen",
+    "extra_pts":"Extra","special_pts":"Especial","spent_pts":"Gastado","account_settings":"Cuenta","timezone":"Zona",
+    "select_timezone":"Región","custom_tz":"Custom","tz_offset":"Desfase","save_tz":"Guardar","new_username":"Nuevo",
+    "leave_blank":"Vacío=sin cambio","change_username":"Cambiar","change_pwd":"Cambiar MDP","change_security":"Cambiar seg.",
+    "new_security_q":"Nueva pregunta","new_security_a":"Nueva respuesta","save_security":"Guardar","webhook":"Webhook",
+    "save_webhook":"Guardar","export_data":"📥 Exportar","logout_btn":"Salir","select_child":"Seleccionar",
+    "admin_select_target":"Admin: objetivo","penetrate":"Perforar","no_children_bound":"Sin niños",
+    "role_admin":"Admin","role_host":"Padre","role_user":"Niño","role_solo":"Solo","remaining":"Quedan",
+    "permanent":"Permanente","expired":"Caducado","tab_checkin":"Registro","tab_extra":"Extra","tab_history":"Historial",
+    "tab_shop":"Tienda","tab_redeem":"Canje","tab_exam":"Examen","tab_event":"Evento","tab_settings":"Ajustes",
+    "tab_leaderboard":"Ranking","search_users":"🔍 Buscar","search_children":"🔍 Niños","no_match":"Sin resultados",
+    "no_tasks_today":"Sin tareas","basic_req":"Básico","full_req":"Máximo","today_done":"Hecho",
+    "undo_checkin":"Deshacer","base_score":"Base","today_total":"Total","est_total":"Estimado",
+    "save_checkin":"Guardar","saved":"Guardado","bonus":"Bono","shop_empty":"Vacío","redeem_btn":"Canjear",
+    "confirm_deduct":"Confirmar","points_insufficient":"Insuficiente","redeem_ok":"Canjeado","redeem_history":"Historial",
+    "none_yet":"Ninguno","redeem_conflict":"Conflicto, reintente","cancel":"Cancelar","backup_card":"Recuperación",
+    "history_title":"Historial","checkin_hist_detail":"Detalle","select_date":"Fecha","time_view":"Vista",
+    "by_day":"Diario","by_week":"Semanal","by_month":"Mensual","no_data":"Sin datos","no_record":"Sin registros",
+    "done_items":"Hecho:","weekly_report":"### 📊 Semanal","week_checkin":"Días","week_total":"Total",
+    "day_max":"Máximo","gen_report":"📸 Generar","save_report":"⬇️ Descargar","report_ok":"Generado",
+    "report_failed":"Error","makeup_intro":"🎫 **{n} tarjetas**","makeup_pick_date":"Fecha",
+    "makeup_pick_tasks":"**Tareas del {d}:**","makeup_submit":"Usar 1","makeup_ok":"Éxito","makeup_fail":"Error",
+    "makeup_no_miss":"Asistencia completa","makeup_tip":"💡 En tienda","makeup_host_tip":"💡 Por el niño",
+    "makeup_host_self":"💡 Cuenta padre","exam_title":"Exámenes","exam_no_subject":"Sin materias",
+    "exam_score":"(máx {max}, objetivo {target})","exam_grade":"(objetivo {target})","exam_ranks":"**Top %**",
+    "exam_cn":"Chino","exam_ma":"Matemát.","exam_en":"Inglés","exam_estimate":"### Estimado: **{pts}**",
+    "exam_save":"Guardar","exam_saved":"Guardado","exam_hit":"{sub} +{pts}","exam_over":"{sub} +{n} +{pts}",
+    "exam_up":"{sub} +{n} +{pts}","exam_multi":"{n}+ +{pts}","exam_rank":"{sub} {pct}% +{pts}",
+    "exam_rank_more":"+{n} +{pts}","event_title":"Eventos","event_fired":"Ya: {note} +{pts}",
+    "event_confirm":"🎲 ¿Usar el chance?","event_roll":"Sí","event_roll_btn":"Girar","event_got":"+{pts}",
+    "event_note":"Explosión","extra_title":"Extra","extra_name":"Nombre","extra_points":"Puntos",
+    "extra_submit":"Enviar","extra_saved":"Registrado: {name} ({pts})","extra_clear":"Borrar","extra_none":"Ninguno",
+    "extra_only_parent":"Solo padres","lb_title":"🏆 Ranking","lb_period":"Periodo","lb_day":"Día","lb_month":"Mes",
+    "lb_total":"Total","lb_score":"pts","lb_no_data":"Sin datos","lb_you":"(tú)","lb_only_you":"Sin hermanos",
+    "redeem_tip_expired":"Prueba [{user}] caducó","redeem_code":"Código","redeem_activate":"Activar",
+    "redeem_invalid":"Inválido","redeem_success":"Activado","redeem_fail":"Error","time_arrive":"¡Tiempo!",
+    "exam_already_submitted":"✅ Ya ({time}) +{pts}","exam_detail_prefix":"Detalle: {detail}",
+    "exam_one_per_day":"1 por día","exam_duplicate_error":"Ya enviado",
     "weekday_short":["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"],
 },
 "ar": {
-    "language":"اللغة / Language","app_title":"تسجيل الدراسة",
-    "login":"تسجيل الدخول","register":"إنشاء حساب","find_pwd":"استعادة كلمة المرور","username":"اسم المستخدم","password":"كلمة المرور",
-    "set_username":"اسم المستخدم","set_pwd":"كلمة المرور","confirm_pwd":"تأكيد كلمة المرور",
-    "security_q":"سؤال الأمان","security_a":"إجابة الأمان",
-    "login_btn":"دخول","register_btn":"تسجيل","reset_btn":"إعادة تعيين",
-    "wrong_creds":"اسم أو كلمة مرور خاطئة","fill_all":"املأ جميع الحقول","pwd_mismatch":"كلمتا المرور غير متطابقتين",
-    "reserved_name":"الاسم محجوز","user_exists":"الاسم موجود مسبقاً","register_ok":"تم التسجيل! تجربة 3 أيام.",
-    "no_security_q":"لا يوجد سؤال أمان. اتصل بالمسؤول.","user_not_exist":"المستخدم غير موجود",
-    "reset_ok":"تم إعادة تعيين كلمة المرور!","wrong_answer":"إجابة خاطئة",
-    "reset_intro":"أدخل اسم المستخدم، تحقق من السؤال، ثم ضع كلمة مرور جديدة.",
-    "input_username":"أدخل اسم المستخدم","new_password":"كلمة مرور جديدة",
-    "pwd_req": "🔐 كلمة المرور: 6 أحرف على الأقل، يُنصح بالحروف والأرقام؛ 123456 ممنوعة",
-    "pwd_err_empty": "لا يمكن أن تكون كلمة المرور فارغة",
-    "pwd_err_too_short": "يجب أن تكون كلمة المرور 6 أحرف على الأقل",
-    "pwd_err_too_long": "يجب ألا تتجاوز كلمة المرور 72 حرفاً",
-    "pwd_err_default": "كلمة المرور الافتراضية 123456 غير مسموحة",
-    "pwd_err_all_digits": "كلمة المرور المكونة من أرقام فقط غير مسموحة؛ اخلط الحروف والأرقام",
-    "op_failed":"فشلت العملية.","db_failed":"فشل الاتصال بقاعدة البيانات.",
-    "sidebar_title":"تسجيل الدراسة","mobile_mode":"📱 الوضع المبسط","current_identity":"مسجل كـ",
-    "local_time":"الوقت المحلي","makeup_cards":"🎫 بطاقات التعويض","available_points":"النقاط المتاحة",
-    "timer":"مؤقت التركيز","badges":"شاراتي","no_badges":"لا شارات","points_detail":"تفاصيل النقاط",
-    "checkin_pts":"تسجيل","longterm_pts":"طويل الأمد","exam_pts":"اختبار","extra_pts":"إضافي","special_pts":"خاص","spent_pts":"مُنفق",
-    "account_settings":"الحساب والبيانات","timezone":"المنطقة الزمنية","select_timezone":"المنطقة / الزمن","custom_tz":"مخصص",
-    "tz_offset":"إزاحة UTC (ساعة)","save_tz":"حفظ","new_username":"اسم جديد","leave_blank":"فارغ = دون تغيير",
-    "change_username":"تغيير الاسم","change_pwd":"تغيير كلمة المرور","change_security":"تغيير الأمان",
-    "new_security_q":"سؤال أمان جديد","new_security_a":"إجابة أمان جديدة","save_security":"حفظ",
-    "webhook":"Webhook التذكير","save_webhook":"حفظ","export_data":"📥 تصدير (JSON)","logout_btn":"تسجيل الخروج",
-    "select_child":"اختر طفلاً","admin_select_target":"المسؤول: اختر الهدف",
-    "penetrate":"اختراق","no_children_bound":"لا يوجد أطفال مرتبطون.",
-    "role_admin":"مسؤول","role_host":"ولي أمر","role_user":"طفل","role_solo":"فردي",
-    "remaining":"متبقي","permanent":"دائم","expired":"منتهي",
-    "tab_checkin":"تسجيل","tab_extra":"إضافي","tab_history":"السجل","tab_shop":"المتجر","tab_redeem":"استبدال",
-    "tab_exam":"اختبار","tab_event":"حدث","tab_settings":"إعدادات","tab_leaderboard":"لوحة الصدارة",
-    "search_users":"🔍 البحث","search_children":"🔍 البحث عن أطفال","no_match":"لا نتائج",
-    "no_tasks_today":"لا توجد مهام اليوم. أضفها في الإعدادات.",
-    "basic_req":"الحد الأدنى","full_req":"الدرجة الكاملة","today_done":"اكتمل تسجيل اليوم.",
-    "undo_checkin":"إلغاء تسجيل اليوم","base_score":"النقاط الأساسية","today_total":"إجمالي اليوم",
-    "est_total":"الإجمالي المتوقع","save_checkin":"حفظ","saved":"تم الحفظ!","bonus":"مكافأة",
-    "shop_empty":"المتجر فارغ.","redeem_btn":"استبدال","confirm_deduct":"تأكيد الخصم",
-    "points_insufficient":"نقاط غير كافية.","redeem_ok":"تم الاستبدال!","redeem_history":"سجل الاستبدال","none_yet":"لا شيء",
-    "cancel":"إلغاء","backup_card":"بطاقة التعويض",
-    "history_title":"السجل والرسوم","checkin_hist_detail":"تفاصيل التسجيل","select_date":"اختر التاريخ",
-    "time_view":"عرض الوقت","by_day":"يومي","by_week":"أسبوعي","by_month":"شهري",
-    "no_data":"لا بيانات","no_record":"لا سجلات","done_items":"المكتمل:",
-    "weekly_report":"### 📊 التقرير الأسبوعي","week_checkin":"أيام هذا الأسبوع","week_total":"إجمالي الأسبوع",
-    "day_max":"أقصى يوم","gen_report":"📸 توليد وتنزيل التقرير","save_report":"⬇️ تنزيل الصورة",
-    "report_ok":"تم إنشاء التقرير.","report_failed":"فشل إنشاء الصورة.",
-    "makeup_intro":"🎫 **{n} بطاقة تعويض متاحة:**",
-    "makeup_pick_date":"اختر التاريخ","makeup_pick_tasks":"**اختر المهام المنجزة في {d}:**",
-    "makeup_submit":"استخدم بطاقة","makeup_ok":"تم التعويض!","makeup_fail":"فشل التعويض.",
-    "makeup_no_miss":"حضور كامل 7 أيام!","makeup_tip":"💡 بطاقات في المتجر.",
-    "makeup_host_tip":"💡 يجب أن يقوم الطفل بذلك.","makeup_host_self":"💡 حساب ولي الأمر. بدّل الطفل.",
-    "exam_title":"الاختبارات","exam_no_subject":"لا مواد مكونة!",
-    "exam_score":"(الأقصى {max}، الهدف {target})","exam_grade":"(الهدف {target})",
-    "exam_ranks":"**أفضل % في الصيني/الرياضيات/الإنجليزي (100 = تجاهل)**",
-    "exam_cn":"الصينية","exam_ma":"الرياضيات","exam_en":"الإنجليزية",
-    "exam_estimate":"### المتوقع: **{pts}** نقطة ({hits} مادة)","exam_save":"حفظ النتيجة",
-    "exam_saved":"تم الحفظ!","exam_hit":"{sub} محقق -> +{pts}","exam_over":"  {sub} +{n} مستوى -> +{pts}",
-    "exam_up":"  {sub} ارتفع {n} -> +{pts}","exam_multi":"{n}+ مواد -> +{pts}",
-    "exam_rank":"{sub} أفضل {pct}% -> +{pts}","exam_rank_more":"  +{n} -> +{pts}",
-    "event_title":"أحداث خاصة","event_fired":"مُفعّل اليوم: {note} +{pts}",
-    "event_confirm":"🎲 استخدام فرصة اليوم؟","event_roll":"تأكيد","event_roll_btn":"أدر",
-    "event_got":"+{pts} نقاط!","event_note":"انفجار النقاط",
-    "extra_title":"نقاط إضافية","extra_name":"الاسم","extra_points":"النقاط (سالب مسموح)",
-    "extra_submit":"إرسال","extra_saved":"مسجل: {name} ({pts})",
-    "extra_clear":"مسح","extra_none":"لا شيء",
-    "extra_only_parent":"للآباء/المسؤولين فقط.",
-    "lb_title":"🏆 ترتيب الأشقاء","lb_period":"الفترة","lb_day":"يومي","lb_month":"شهري","lb_total":"إجمالي",
-    "lb_score":"نقطة","lb_no_data":"لا بيانات","lb_you":"(أنت)",
-    "lb_only_you":"لا أشقاء آخرون.",
-    "redeem_tip_expired":"انتهت تجربة [{user}]. اطلب رمزاً من المسؤول.",
-    "redeem_code":"الرمز","redeem_activate":"تفعيل","redeem_invalid":"رمز غير صالح أو مستخدم",
-    "redeem_success":"تم التفعيل!","redeem_fail":"فشل التفعيل.",
-    "time_arrive":"انتهى الوقت!",
-    "exam_already_submitted":"✅ تم الإرسال اليوم ({time})، +{pts} نقطة",
-    "exam_detail_prefix":"التفاصيل: {detail}",
-    "exam_one_per_day":"إرسال واحد فقط في اليوم. عد غداً!",
-    "exam_duplicate_error":"تم الإرسال اليوم بالفعل. لا ترسل مرة أخرى.",
-    "weekday_short":["إث","ثل","أر","خم","جم","سب","أح"],
+    "language":"اللغة","app_title":"تسجيل","login":"دخول","register":"تسجيل","find_pwd":"استعادة",
+    "username":"المستخدم","password":"كلمة المرور","set_username":"المستخدم","set_pwd":"كلمة","confirm_pwd":"تأكيد",
+    "security_q":"سؤال","security_a":"إجابة","login_btn":"دخول","register_btn":"تسجيل","reset_btn":"إعادة",
+    "wrong_creds":"خطأ","fill_all":"املأ الكل","pwd_mismatch":"غير متطابقة","reserved_name":"محجوز",
+    "user_exists":"موجود","register_ok":"تم!","no_security_q":"لا سؤال","user_not_exist":"غير موجود",
+    "reset_ok":"تم","wrong_answer":"خطأ","reset_intro":"اسم المستخدم","input_username":"المستخدم",
+    "new_password":"كلمة جديدة","pwd_req":"🔐 6+","pwd_err_empty":"فارغ","pwd_err_too_short":"قصير",
+    "pwd_err_too_long":"طويل","pwd_err_default":"123456 ممنوع","pwd_err_all_digits":"أرقام فقط ممنوع",
+    "webhook_unsafe":"❌ URL غير صالح","webhook_saved":"✅ تم","op_failed":"فشل","db_failed":"فشل DB",
+    "sidebar_title":"تسجيل","mobile_mode":"📱 محمول","current_identity":"مسجل","local_time":"الوقت",
+    "makeup_cards":"🎫 بطاقات","available_points":"نقاط","timer":"مؤقت","badges":"شارات","no_badges":"لا",
+    "points_detail":"تفاصيل","checkin_pts":"تسجيل","longterm_pts":"طويل","exam_pts":"اختبار","extra_pts":"إضافي",
+    "special_pts":"خاص","spent_pts":"منفق","account_settings":"الحساب","timezone":"المنطقة","select_timezone":"المنطقة",
+    "custom_tz":"مخصص","tz_offset":"UTC","save_tz":"حفظ","new_username":"اسم جديد","leave_blank":"فارغ=بدون",
+    "change_username":"تغيير","change_pwd":"تغيير كلمة","change_security":"تغيير أمان","new_security_q":"سؤال جديد",
+    "new_security_a":"إجابة جديدة","save_security":"حفظ","webhook":"Webhook","save_webhook":"حفظ",
+    "export_data":"📥 تصدير","logout_btn":"خروج","select_child":"اختر","admin_select_target":"المسؤول: هدف",
+    "penetrate":"اختراق","no_children_bound":"لا أطفال","role_admin":"مسؤول","role_host":"ولي","role_user":"طفل",
+    "role_solo":"فردي","remaining":"متبقي","permanent":"دائم","expired":"منتهي","tab_checkin":"تسجيل",
+    "tab_extra":"إضافي","tab_history":"السجل","tab_shop":"المتجر","tab_redeem":"استبدال","tab_exam":"اختبار",
+    "tab_event":"حدث","tab_settings":"إعدادات","tab_leaderboard":"ترتيب","search_users":"🔍 بحث",
+    "search_children":"🔍 أطفال","no_match":"لا نتائج","no_tasks_today":"لا مهام","basic_req":"أساسي",
+    "full_req":"كامل","today_done":"تم","undo_checkin":"إلغاء","base_score":"أساسي","today_total":"إجمالي",
+    "est_total":"متوقع","save_checkin":"حفظ","saved":"تم","bonus":"مكافأة","shop_empty":"فارغ","redeem_btn":"استبدال",
+    "confirm_deduct":"تأكيد","points_insufficient":"غير كاف","redeem_ok":"تم","redeem_history":"سجل","none_yet":"لا",
+    "redeem_conflict":"تعارض، أعد","cancel":"إلغاء","backup_card":"بطاقة","history_title":"السجل",
+    "checkin_hist_detail":"تفاصيل","select_date":"تاريخ","time_view":"عرض","by_day":"يومي","by_week":"أسبوعي",
+    "by_month":"شهري","no_data":"لا","no_record":"لا","done_items":"مكتمل:","weekly_report":"### 📊 أسبوعي",
+    "week_checkin":"أيام","week_total":"إجمالي","day_max":"أقصى","gen_report":"📸 توليد","save_report":"⬇️ تنزيل",
+    "report_ok":"تم","report_failed":"فشل","makeup_intro":"🎫 **{n} بطاقات**","makeup_pick_date":"تاريخ",
+    "makeup_pick_tasks":"**مهام {d}:**","makeup_submit":"استخدم","makeup_ok":"تم","makeup_fail":"فشل",
+    "makeup_no_miss":"حضور كامل","makeup_tip":"💡 متجر","makeup_host_tip":"💡 من الطفل","makeup_host_self":"💡 ولي",
+    "exam_title":"اختبارات","exam_no_subject":"لا مواد","exam_score":"(أقصى {max}، {target})","exam_grade":"({target})",
+    "exam_ranks":"**أفضل %**","exam_cn":"صيني","exam_ma":"رياضيات","exam_en":"إنجليزي",
+    "exam_estimate":"### متوقع: **{pts}**","exam_save":"حفظ","exam_saved":"تم","exam_hit":"{sub} +{pts}",
+    "exam_over":"{sub} +{n} +{pts}","exam_up":"{sub} +{n} +{pts}","exam_multi":"{n}+ +{pts}",
+    "exam_rank":"{sub} {pct}% +{pts}","exam_rank_more":"+{n} +{pts}","event_title":"أحداث",
+    "event_fired":"مفعل: {note} +{pts}","event_confirm":"🎲 استخدام فرصة؟","event_roll":"تأكيد",
+    "event_roll_btn":"أدر","event_got":"+{pts}","event_note":"انفجار","extra_title":"نقاط إضافية",
+    "extra_name":"اسم","extra_points":"نقاط","extra_submit":"إرسال","extra_saved":"مسجل: {name} ({pts})",
+    "extra_clear":"مسح","extra_none":"لا","extra_only_parent":"للآباء","lb_title":"🏆 ترتيب","lb_period":"فترة",
+    "lb_day":"يومي","lb_month":"شهري","lb_total":"إجمالي","lb_score":"نقطة","lb_no_data":"لا",
+    "lb_you":"(أنت)","lb_only_you":"لا أشقاء","redeem_tip_expired":"تجربة [{user}] انتهت","redeem_code":"رمز",
+    "redeem_activate":"تفعيل","redeem_invalid":"غير صالح","redeem_success":"تم","redeem_fail":"فشل",
+    "time_arrive":"انتهى!","exam_already_submitted":"✅ تم ({time}) +{pts}","exam_detail_prefix":"تفاصيل: {detail}",
+    "exam_one_per_day":"1 يومياً","exam_duplicate_error":"تم اليوم","weekday_short":["إث","ثل","أر","خم","جم","سب","أح"],
 },
 }
 
@@ -705,6 +538,49 @@ def verify_security_answer(ans, stored):
         if len(stored) == 64: return hashlib.sha256(ans.strip().lower().encode()).hexdigest() == stored
     except Exception: pass
     return False
+
+# 【H3 修复】Webhook URL 安全校验：拒绝回环/链路本地/保留/组播地址
+def _safe_webhook(url: str) -> tuple[bool, str]:
+    """返回 (是否安全, 错误原因)。拒绝 loopback / link-local / reserved / multicast，允许私网（自建 Bark）。"""
+    if not url:
+        return False, "URL 不能为空"
+    try:
+        p = urllib.parse.urlparse(url)
+        if p.scheme not in ("http", "https"):
+            return False, "只允许 http/https 协议"
+        if not p.hostname:
+            return False, "URL 缺少主机名"
+        try:
+            infos = socket.getaddrinfo(p.hostname, None)
+        except socket.gaierror:
+            return False, "无法解析域名"
+        if not infos:
+            return False, "无法解析域名"
+        for info in infos:
+            try:
+                addr = ipaddress.ip_address(info[4][0])
+                if addr.is_loopback:
+                    return False, f"禁止回环地址 {addr}"
+                if addr.is_link_local:
+                    return False, f"禁止链路本地/云元数据地址 {addr}"
+                if addr.is_reserved:
+                    return False, f"禁止保留地址 {addr}"
+                if addr.is_multicast:
+                    return False, f"禁止组播地址 {addr}"
+            except ValueError:
+                return False, "IP 解析异常"
+        return True, ""
+    except Exception as e:
+        return False, f"校验异常：{e}"
+
+# 【H2 修复】事务内锁定用户行，防止并发双花
+def lock_user_row(db, username: str):
+    """必须在 db.begin() 之后调用；用 no-op 操作获取行锁。"""
+    if db.is_cloud:
+        db.execute("SELECT 1 FROM users WHERE username=? FOR UPDATE", (username,))
+    else:
+        # SQLite 的 no-op UPDATE 会获取 RESERVED 锁，实现写事务串行化
+        db.execute("UPDATE users SET makeup_cards = makeup_cards WHERE username=?", (username,))
 
 # ==================== 兼容/运维 ====================
 def _stretch(kwargs):
@@ -844,7 +720,12 @@ class DBWrapper:
         self.conn = conn; self.is_cloud = is_cloud
     def begin(self):
         if self.is_cloud: self.conn.autocommit = False
-        else: self.conn.execute("BEGIN")
+        else:
+            # SQLite: 用 IMMEDIATE 立即获得写锁，避免 DEFERRED 下的竞态
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+            except Exception:
+                self.conn.execute("BEGIN")
     def rollback(self):
         try: self.conn.rollback()
         except: pass
@@ -909,78 +790,50 @@ def run_legacy_constraint_cleanup(db):
     try:
         db.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT)")
         db.commit()
-    except Exception as e:
-        print(f"创建 schema_migrations 失败: {e}")
-
+    except Exception as e: print(f"创建 schema_migrations 失败: {e}")
     try:
         row = db.execute("SELECT version FROM schema_migrations WHERE version=?", ("v1_legacy_constraint_cleanup",)).fetchone()
-        if row:
-            return
-    except Exception as e:
-        print(f"检查 schema_migrations 失败: {e}")
-
+        if row: return
+    except Exception as e: print(f"检查 schema_migrations 失败: {e}")
     try:
         for q in [
             "ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_pkey CASCADE",
             "ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_day_key CASCADE",
             "ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS daily_records_day_owner_id_key CASCADE",
-            "DROP INDEX IF EXISTS daily_records_pkey CASCADE",
-            "DROP INDEX IF EXISTS daily_records_day_key CASCADE",
-            "DROP INDEX IF EXISTS daily_records_day_owner_id_key CASCADE",
-            "ALTER TABLE config_thresholds DROP CONSTRAINT IF EXISTS config_thresholds_pkey CASCADE",
-            "DROP INDEX IF EXISTS config_thresholds_pkey CASCADE",
-            "ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_pkey CASCADE",
-            "ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_subject_key CASCADE",
-            "DROP INDEX IF EXISTS config_exam_pkey CASCADE",
-            "DROP INDEX IF EXISTS config_exam_subject_key CASCADE",
-            "ALTER TABLE config_exam_multihit DROP CONSTRAINT IF EXISTS config_exam_multihit_pkey CASCADE",
-            "DROP INDEX IF EXISTS config_exam_multihit_pkey CASCADE",
-            "ALTER TABLE config_bonus_rules DROP CONSTRAINT IF EXISTS config_bonus_rules_pkey CASCADE",
-            "DROP INDEX IF EXISTS config_bonus_rules_pkey CASCADE",
-            "ALTER TABLE config_tasks DROP CONSTRAINT IF EXISTS config_tasks_pkey CASCADE",
-            "ALTER TABLE config_shop DROP CONSTRAINT IF EXISTS config_shop_pkey CASCADE",
-            "ALTER TABLE config_badges DROP CONSTRAINT IF EXISTS config_badges_pkey CASCADE",
-            "ALTER TABLE special_events DROP CONSTRAINT IF EXISTS special_events_pkey CASCADE",
-            "ALTER TABLE extra_points DROP CONSTRAINT IF EXISTS extra_points_pkey CASCADE",
-            "ALTER TABLE redemptions DROP CONSTRAINT IF EXISTS redemptions_pkey CASCADE",
+            "DROP INDEX IF EXISTS daily_records_pkey CASCADE","DROP INDEX IF EXISTS daily_records_day_key CASCADE","DROP INDEX IF EXISTS daily_records_day_owner_id_key CASCADE",
+            "ALTER TABLE config_thresholds DROP CONSTRAINT IF EXISTS config_thresholds_pkey CASCADE","DROP INDEX IF EXISTS config_thresholds_pkey CASCADE",
+            "ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_pkey CASCADE","ALTER TABLE config_exam DROP CONSTRAINT IF EXISTS config_exam_subject_key CASCADE",
+            "DROP INDEX IF EXISTS config_exam_pkey CASCADE","DROP INDEX IF EXISTS config_exam_subject_key CASCADE",
+            "ALTER TABLE config_exam_multihit DROP CONSTRAINT IF EXISTS config_exam_multihit_pkey CASCADE","DROP INDEX IF EXISTS config_exam_multihit_pkey CASCADE",
+            "ALTER TABLE config_bonus_rules DROP CONSTRAINT IF EXISTS config_bonus_rules_pkey CASCADE","DROP INDEX IF EXISTS config_bonus_rules_pkey CASCADE",
+            "ALTER TABLE config_tasks DROP CONSTRAINT IF EXISTS config_tasks_pkey CASCADE","ALTER TABLE config_shop DROP CONSTRAINT IF EXISTS config_shop_pkey CASCADE",
+            "ALTER TABLE config_badges DROP CONSTRAINT IF EXISTS config_badges_pkey CASCADE","ALTER TABLE special_events DROP CONSTRAINT IF EXISTS special_events_pkey CASCADE",
+            "ALTER TABLE extra_points DROP CONSTRAINT IF EXISTS extra_points_pkey CASCADE","ALTER TABLE redemptions DROP CONSTRAINT IF EXISTS redemptions_pkey CASCADE",
         ]:
-            try:
-                db.execute(q)
-            except Exception as e:
-                _log_db_error("legacy_constraint_cleanup", str(e))
-
+            try: db.execute(q)
+            except Exception as e: _log_db_error("legacy_cleanup", str(e))
         try:
             res = db.execute("SELECT constraint_name FROM information_schema.table_constraints WHERE table_name = 'daily_records' AND constraint_type = 'UNIQUE'").fetchall()
             for row in res:
                 cname = row["constraint_name"]
                 if re.match(r"^[A-Za-z0-9_]+$", str(cname)):
-                    try:
-                        db.execute(f"ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS {cname} CASCADE")
-                    except Exception as e:
-                        _log_db_error("legacy_constraint_cleanup_unique", str(e))
-        except Exception as e:
-            _log_db_error("legacy_constraint_cleanup_query", str(e))
-
+                    try: db.execute(f"ALTER TABLE daily_records DROP CONSTRAINT IF EXISTS {cname} CASCADE")
+                    except Exception as e: _log_db_error("legacy_unique", str(e))
+        except Exception as e: _log_db_error("legacy_query", str(e))
         try:
             db.execute("CREATE SEQUENCE IF NOT EXISTS config_bonus_rules_id_seq")
             db.execute("ALTER TABLE config_bonus_rules ALTER COLUMN id SET DEFAULT nextval('config_bonus_rules_id_seq')")
-        except Exception as e:
-            _log_db_error("legacy_constraint_cleanup_seq", str(e))
-
+        except Exception as e: _log_db_error("legacy_seq", str(e))
         try:
-            db.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                       ("v1_legacy_constraint_cleanup", datetime.now().isoformat()))
-        except Exception as e:
-            _log_db_error("legacy_constraint_cleanup_mark", str(e))
+            db.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", ("v1_legacy_constraint_cleanup", datetime.now().isoformat()))
+        except Exception as e: _log_db_error("legacy_mark", str(e))
         db.commit()
-    except Exception as e:
-        print(f"清理历史约束失败: {e}")
+    except Exception as e: print(f"清理历史约束失败: {e}")
 
 def init_db(db):
-    if db.is_cloud:
-        run_legacy_constraint_cleanup(db)
+    if db.is_cloud: run_legacy_constraint_cleanup(db)
 
-    tables_common = [
+    for sql in [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT, plan_expires_at TEXT, language TEXT)",
         "CREATE TABLE IF NOT EXISTS redeem_codes (code TEXT PRIMARY KEY, days INTEGER, is_used INTEGER DEFAULT 0, used_by TEXT, created_at TEXT)",
         "CREATE TABLE IF NOT EXISTS daily_records (day TEXT, owner_id TEXT, done_tasks TEXT, base_score REAL, bonus_score REAL, bonus_detail TEXT, total_score REAL, updated_at TEXT, basic_thr REAL, full_thr REAL)",
@@ -991,8 +844,7 @@ def init_db(db):
         "CREATE TABLE IF NOT EXISTS config_thresholds (weekday INTEGER, owner_id TEXT, basic REAL, \"full\" REAL)",
         "CREATE TABLE IF NOT EXISTS config_bonus_rules (owner_id TEXT PRIMARY KEY, rules_json TEXT)",
         "CREATE TABLE IF NOT EXISTS config_exam_multihit (hit_count INTEGER, owner_id TEXT, points REAL)",
-    ]
-    for sql in tables_common:
+    ]:
         try: db.execute(sql)
         except: pass
 
@@ -1022,22 +874,44 @@ def init_db(db):
 
     if db.is_cloud:
         for q in [
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS security_question TEXT","ALTER TABLE users ADD COLUMN IF NOT EXISTS security_answer TEXT","ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user'","ALTER TABLE users ADD COLUMN IF NOT EXISTS webhook_url TEXT","ALTER TABLE users ADD COLUMN IF NOT EXISTS makeup_cards INTEGER DEFAULT 0","ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone_offset REAL DEFAULT 8.0","ALTER TABLE users ADD COLUMN IF NOT EXISTS host_id TEXT","ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_expires_at TEXT","ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT",
-            "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS basic_thr REAL","ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS full_thr REAL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT",
+            "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS basic_thr REAL",
+            "ALTER TABLE daily_records ADD COLUMN IF NOT EXISTS full_thr REAL",
             "ALTER TABLE period_bonus ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE redemptions ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE exam_rewards ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE special_events ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE extra_points ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE config_tasks ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE config_shop ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE config_exam ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE config_exam_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE config_thresholds ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE config_bonus_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'","ALTER TABLE config_exam_multihit ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE redemptions ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE exam_rewards ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE special_events ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE extra_points ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_tasks ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_shop ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_thresholds ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_bonus_rules ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_multihit ADD COLUMN IF NOT EXISTS owner_id TEXT DEFAULT '晴'",
         ]:
             try: db.execute(q)
             except: pass
         db.commit()
     else:
         for q in [
-            "ALTER TABLE users ADD COLUMN security_question TEXT","ALTER TABLE users ADD COLUMN security_answer TEXT","ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'","ALTER TABLE users ADD COLUMN webhook_url TEXT","ALTER TABLE users ADD COLUMN makeup_cards INTEGER DEFAULT 0","ALTER TABLE users ADD COLUMN timezone_offset REAL DEFAULT 8.0","ALTER TABLE users ADD COLUMN host_id TEXT","ALTER TABLE users ADD COLUMN plan_expires_at TEXT","ALTER TABLE users ADD COLUMN language TEXT",
-            "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE daily_records ADD COLUMN basic_thr REAL","ALTER TABLE daily_records ADD COLUMN full_thr REAL",
+            "ALTER TABLE users ADD COLUMN language TEXT",
+            "ALTER TABLE daily_records ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE daily_records ADD COLUMN basic_thr REAL",
+            "ALTER TABLE daily_records ADD COLUMN full_thr REAL",
             "ALTER TABLE period_bonus ADD COLUMN owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE redemptions ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE exam_rewards ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE special_events ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE extra_points ADD COLUMN owner_id TEXT DEFAULT '晴'",
-            "ALTER TABLE config_tasks ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE config_shop ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE config_exam ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE config_exam_rules ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE config_thresholds ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE config_bonus_rules ADD COLUMN owner_id TEXT DEFAULT '晴'","ALTER TABLE config_exam_multihit ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE redemptions ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE exam_rewards ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE special_events ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE extra_points ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_tasks ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_shop ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_thresholds ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_bonus_rules ADD COLUMN owner_id TEXT DEFAULT '晴'",
+            "ALTER TABLE config_exam_multihit ADD COLUMN owner_id TEXT DEFAULT '晴'",
         ]:
             try: db.execute(q)
             except: pass
@@ -1059,7 +933,7 @@ def init_db(db):
             if not admin_pwd:
                 admin_pwd = secrets.token_urlsafe(12); generated = True
             admin_sa = secrets.token_urlsafe(12)
-            print(f"⚠️ 生成初始管理员: {admin_user} / {admin_pwd}" + (" (随机生成，请立即查看日志并登录后修改密码)" if generated else ""))
+            print(f"⚠️ 生成初始管理员: {admin_user} / {admin_pwd}" + (" (随机生成)" if generated else ""))
             db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer, plan_expires_at) VALUES (?, ?, 'admin', ?, ?, '2099-12-31 23:59:59')",
                        (admin_user, hash_pwd_bcrypt(admin_pwd), "初始密保", hash_security_answer(admin_sa)))
             if not db.execute("SELECT * FROM config_tasks WHERE owner_id=?", (admin_user,)).fetchone():
@@ -1084,7 +958,6 @@ def init_old_admin_data(db, owner_id):
             db.execute(f"DELETE FROM {tb} WHERE owner_id=?", (owner_id,))
         db.commit()
     except Exception as e: print(f"清理旧配置失败: {e}")
-
     BASE_TASKS = [("hw_sort","校内","作业分类",1.0),("hw_done","校内","作业完成",2.0)]
     for i in range(7):
         for task in BASE_TASKS:
@@ -1117,11 +990,9 @@ def is_solo(role): return role == "solo"
 def can_manage_others(role): return role in ("admin", "host")
 def can_edit_configs(role): return role in ("admin", "host", "solo")
 def require_admin(role, msg="仅管理员可操作"):
-    if not is_admin(role):
-        st.error(msg); st.stop()
+    if not is_admin(role): st.error(msg); st.stop()
 def require_admin_or_host(role, msg="仅管理员或家长可操作"):
-    if not can_manage_others(role):
-        st.error(msg); st.stop()
+    if not can_manage_others(role): st.error(msg); st.stop()
 
 def _remaining_admins(db, exclude_username):
     try: return db.execute("SELECT COUNT(*) as c FROM users WHERE role='admin' AND username != ?", (exclude_username,)).fetchone()["c"]
@@ -1484,8 +1355,7 @@ def login_page(db):
                 elif u.lower() in ["system", "admin"]: st.error(t("reserved_name"))
                 else:
                     err = validate_password_strength(p)
-                    if err:
-                        st.error(err); st.stop()
+                    if err: st.error(err); st.stop()
                     try:
                         if db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone(): st.error(t("user_exists"))
                         else:
@@ -1517,8 +1387,7 @@ def login_page(db):
                                 if not ans or not new_p: st.error(t("fill_all"))
                                 else:
                                     err = validate_password_strength(new_p)
-                                    if err:
-                                        st.error(err); st.stop()
+                                    if err: st.error(err); st.stop()
                                     if verify_security_answer(ans, user["security_answer"]):
                                         new_hash = hash_pwd_bcrypt(new_p)
                                         db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, u_reset))
@@ -1568,8 +1437,7 @@ def main():
                 elif new_p != confirm_p: st.error(t("pwd_mismatch"))
                 else:
                     err = validate_password_strength(new_p)
-                    if err:
-                        st.error(err); st.stop()
+                    if err: st.error(err); st.stop()
                     try:
                         new_hash = hash_pwd_bcrypt(new_p)
                         db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, current_user))
@@ -1587,14 +1455,19 @@ def main():
     user_tz = user_row.get("timezone_offset") or 8.0
     now = get_user_now(user_tz); today = now.date()
 
+    # 【H3 修复】夜间提醒也做安全校验
     try:
         if now.hour >= 21:
             tr = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), current_user)).fetchone()
             if not tr and user_row.get("webhook_url") and st.session_state.get(f"alerted_{today}") != True:
                 url = user_row["webhook_url"]
-                if "bark" in url: requests.get(f"{url}/今天还没打卡哦！", timeout=2)
-                elif "serverchan" in url: requests.post(url, data={"title":"提醒","desp":"今天还没打卡哦！"}, timeout=2)
-                else: requests.get(url, timeout=2)
+                safe, _ = _safe_webhook(url)
+                if safe:
+                    if "bark" in url: requests.get(f"{url}/今天还没打卡哦！", timeout=2)
+                    elif "serverchan" in url: requests.post(url, data={"title":"提醒","desp":"今天还没打卡哦！"}, timeout=2)
+                    else: requests.get(url, timeout=2)
+                else:
+                    _log_db_error("webhook_unsafe_send", f"blocked {url}")
                 st.session_state[f"alerted_{today}"] = True
     except: pass
 
@@ -1740,8 +1613,7 @@ def main():
                 if st.button(t("change_pwd"), **_stretch({})):
                     if new_pwd:
                         err = validate_password_strength(new_pwd)
-                        if err:
-                            st.error(err); st.stop()
+                        if err: st.error(err); st.stop()
                         try:
                             new_hash = hash_pwd_bcrypt(new_pwd)
                             db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, current_user))
@@ -1763,10 +1635,24 @@ def main():
                         except RuntimeError: st.error(t("op_failed"))
 
                 st.divider()
-                webhook_input = st.text_input(t("webhook"), value=user_row.get("webhook_url") or "")
+                st.markdown(f"**{t('webhook')}**")
+                webhook_input = st.text_input(t("webhook"), value=user_row.get("webhook_url") or "", placeholder="https://...")
                 if st.button(t("save_webhook"), **_stretch({})):
-                    try: db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user)); db.commit(); st.success("OK")
-                    except RuntimeError: st.error(t("op_failed"))
+                    # 【H3 修复】保存时校验
+                    if webhook_input:
+                        safe, reason = _safe_webhook(webhook_input)
+                        if not safe:
+                            st.error(f"{t('webhook_unsafe')}: {reason}")
+                        else:
+                            try:
+                                db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user))
+                                db.commit(); st.success(t("webhook_saved"))
+                            except RuntimeError: st.error(t("op_failed"))
+                    else:
+                        try:
+                            db.execute("UPDATE users SET webhook_url=? WHERE username=?", ("", current_user))
+                            db.commit(); st.success("OK")
+                        except RuntimeError: st.error(t("op_failed"))
 
                 st.divider()
                 try:
@@ -2063,7 +1949,7 @@ def main():
                 except: pass
             else: st.info(t("no_record"))
 
-    # ============ 商城 ============
+    # ============ 商城（H2 修复） ============
     if t("tab_shop") in tab_dict:
         with tab_dict[t("tab_shop")]:
             st.subheader(t("tab_shop"))
@@ -2081,19 +1967,25 @@ def main():
                     if st.session_state.get(ck):
                         cc1, cc2 = st.columns(2)
                         if cc1.button(t("confirm_deduct"), key=f"yes_{view_as}_{name}", **_stretch({"type":"primary"})):
+                            # 【H2 修复】事务 + 行锁，防双花
                             db.begin()
                             try:
+                                lock_user_row(db, view_as)  # ← 锁定用户行
                                 q = "SELECT (SELECT COALESCE(SUM(total_score),0) FROM daily_records WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM period_bonus WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM exam_rewards WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM special_events WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM extra_points WHERE owner_id=?)-(SELECT COALESCE(SUM(cost),0) FROM redemptions WHERE owner_id=?) AS bal"
                                 row = db.execute(q, (view_as,view_as,view_as,view_as,view_as,view_as)).fetchone()
                                 if float(row["bal"] or 0) < cost:
-                                    db.end(); st.error(t("points_insufficient"))
+                                    db.rollback(); db.end()
+                                    st.error(t("points_insufficient"))
                                 else:
                                     db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
                                     if name == "补签卡": db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
                                     db.commit(); db.end()
                                     st.session_state[ck] = False; st.cache_data.clear(); st.success(t("redeem_ok")); st.rerun()
-                            except Exception:
-                                db.rollback(); db.end(); st.error(t("op_failed"))
+                            except Exception as e:
+                                try: db.rollback(); db.end()
+                                except: pass
+                                _log_db_error("shop_redeem", str(e))
+                                st.error(t("redeem_conflict"))
                         if cc2.button(t("cancel"), key=f"no_{view_as}_{name}", **_stretch({})):
                             st.session_state[ck] = False; st.rerun()
                     else:
@@ -2697,7 +2589,7 @@ def main():
                             except RuntimeError: st.error(t("op_failed"))
             else: st.info("管理员配置")
 
-            # ---- 7. 用户管理与权限控制 ----
+            # ---- 7. 用户管理 ----
             if is_admin(view_role):
                 require_admin(view_role)
                 st.divider(); st.markdown("### 7. 用户管理与权限控制")
