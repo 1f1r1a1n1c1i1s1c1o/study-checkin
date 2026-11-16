@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 【v8 侧边栏恢复 + 底部导航精简 + 权限错误脱敏】
-# 1. 恢复原侧边栏（去除手机精简开关，保留所有功能）
-# 2. 桌面端：顶部全功能导航；移动端：底部核心导航 + 侧边栏“更多功能”
-# 3. 修复移动端左上角侧边栏按钮无法点击的问题（CSS z-index 调整）
-# 4. 全局异常捕获，非管理员提示“系统异常，请刷新”，管理员可看堆栈
+# 【v9 修复双排重叠 + 桌面端原生 Tab 样式 + 全局异常脱敏】
 import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid, hmac
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1362,10 +1358,6 @@ def render_sidebar(db, current_user, current_role, user_row, user_tz):
                 db.commit()
             except: pass
         
-        # 移动端“更多功能”菜单（由于底部导航已精简，部分 Tab 只能从这里进）
-        if "current_tab" not in st.session_state:
-            st.session_state["current_tab"] = t("tab_checkin")
-            
         st.markdown("---")
         view_as = current_user; view_role = current_role
         if is_user(current_role): view_as = current_user; view_role = "user"
@@ -1540,71 +1532,6 @@ def render_sidebar(db, current_user, current_role, user_row, user_tz):
             st.query_params.clear(); st.rerun()
     return view_as, view_role, bal
 
-# ==================== CSS ====================
-def inject_css():
-    st.markdown("""
-<style>
-/* 桌面端顶部导航样式 */
-.desktop-nav-marker + div [data-testid="stRadio"] > div { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 8px; margin-bottom: 16px; }
-.desktop-nav-marker + div [data-testid="stRadio"] label { margin: 0 !important; padding: 8px 16px !important; border-radius: 8px !important; cursor: pointer !important; background: transparent !important; }
-.desktop-nav-marker + div [data-testid="stRadio"] label[data-checked="true"] { background: #eff6ff !important; color: #2563eb !important; font-weight: bold !important; }
-.desktop-nav-marker + div [data-testid="stRadio"] [data-testid="stMarkdownContainer"] p { font-size: 15px !important; }
-
-/* 默认隐藏移动端导航 */
-.mobile-nav-marker + div { display: none !important; }
-
-@media (max-width: 768px) {
-    /* 隐藏桌面端导航 */
-    .desktop-nav-marker + div { display: none !important; }
-    
-    /* 显示移动端底部导航 */
-    .mobile-nav-marker + div {
-        display: block !important;
-        position: fixed !important;
-        bottom: 0 !important;
-        left: 0 !important;
-        width: 100% !important;
-        z-index: 9999 !important;
-        background: #ffffff !important;
-        border-top: 1px solid #e5e7eb !important;
-        padding: 8px 4px !important;
-        box-shadow: 0 -2px 10px rgba(0,0,0,0.05) !important;
-    }
-    .mobile-nav-marker + div [data-testid="stRadio"] > div {
-        display: flex !important;
-        justify-content: space-around !important;
-        gap: 0 !important;
-    }
-    .mobile-nav-marker + div [data-testid="stRadio"] label {
-        flex: 1 !important;
-        text-align: center !important;
-        padding: 4px 0 !important;
-        margin: 0 !important;
-    }
-    .mobile-nav-marker + div [data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {
-        font-size: 11px !important;
-        white-space: nowrap !important;
-    }
-    .mobile-nav-marker + div [data-testid="stRadio"] [data-testid="stWidgetLabel"] {
-        display: none !important;
-    }
-    
-    /* 确保顶部侧边栏展开按钮可以点击 */
-    header[data-testid="stHeader"] {
-        z-index: 999999 !important;
-        background: rgba(255,255,255,0.9) !important;
-        backdrop-filter: blur(4px) !important;
-    }
-    
-    /* 页面底部留白，防止被底部导航遮挡 */
-    .main .block-container {
-        padding-bottom: 90px !important;
-        padding-top: 1rem !important;
-    }
-}
-</style>
-""", unsafe_allow_html=True)
-
 # ==================== 主要逻辑分发 ====================
 def run_app(db):
     if "user" not in st.session_state:
@@ -1738,25 +1665,118 @@ def run_app(db):
                     st.session_state["current_tab"] = tab
                     st.rerun()
 
-    # 桌面端顶部导航
-    st.markdown('<div class="desktop-nav-marker"></div>', unsafe_allow_html=True)
-    idx_all = all_tabs.index(st.session_state["current_tab"]) if st.session_state["current_tab"] in all_tabs else 0
-    sel_desktop = st.radio("nav_desktop", all_tabs, index=idx_all, horizontal=True, label_visibility="collapsed", key="nav_desktop_widget")
-    if sel_desktop != st.session_state["current_tab"]:
-        st.session_state["current_tab"] = sel_desktop
+    # 动态生成 CSS 隐藏移动端不需要的选项
+    hidden_indices = [str(i+1) for i, tab in enumerate(all_tabs) if tab not in mobile_tabs]
+    css_hidden_selectors = "\n".join([f'.stRadio [role="radiogroup"] > label:nth-child({idx}) {{ display: none !important; }}' for idx in hidden_indices])
+
+    st.markdown(f"""
+<style>
+/* 全局：隐藏圆圈 */
+.stRadio [role="radiogroup"] > label > div:first-child {{
+    display: none !important;
+}}
+
+/* 桌面端样式：像原生 Tabs */
+@media (min-width: 769px) {{
+    .stRadio [role="radiogroup"] {{
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: wrap !important;
+        gap: 1.5rem !important;
+        border-bottom: 1px solid rgba(49, 51, 63, 0.1) !important;
+        padding-bottom: 0 !important;
+        margin-bottom: 1.5rem !important;
+    }}
+    .stRadio [role="radiogroup"] > label {{
+        margin: 0 !important;
+        padding: 0.5rem 0 !important;
+        cursor: pointer !important;
+        display: flex !important;
+        align-items: center !important;
+        border-bottom: 2px solid transparent !important;
+        border-radius: 0 !important;
+    }}
+    .stRadio [role="radiogroup"] > label p {{
+        font-size: 1rem !important;
+        color: #31333F !important;
+        margin: 0 !important;
+        font-weight: 400 !important;
+    }}
+    .stRadio [role="radiogroup"] > label:has(input:checked) {{
+        border-bottom-color: #ff4b4b !important;
+    }}
+    .stRadio [role="radiogroup"] > label:has(input:checked) p {{
+        color: #ff4b4b !important;
+        font-weight: 500 !important;
+    }}
+}}
+
+/* 移动端样式：固定在底部 */
+@media (max-width: 768px) {{
+    .stRadio {{
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        z-index: 9999 !important;
+        background: white !important;
+        padding: 6px 4px !important;
+        margin: 0 !important;
+        box-shadow: 0 -2px 10px rgba(0,0,0,0.05) !important;
+    }}
+    .stRadio [role="radiogroup"] {{
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        justify-content: space-around !important;
+        border-bottom: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }}
+    .stRadio [role="radiogroup"] > label {{
+        flex: 1 !important;
+        text-align: center !important;
+        padding: 6px 2px !important;
+        margin: 0 !important;
+        border: none !important;
+        background: transparent !important;
+    }}
+    .stRadio [role="radiogroup"] > label p {{
+        font-size: 12px !important;
+        color: #666 !important;
+        margin: 0 !important;
+    }}
+    .stRadio [role="radiogroup"] > label:has(input:checked) p {{
+        color: #ff4b4b !important;
+        font-weight: 600 !important;
+    }}
+    /* 隐藏移动端不需要的选项 */
+    {css_hidden_selectors}
+    
+    .main .block-container {{
+        padding-bottom: 80px !important;
+    }}
+}}
+</style>
+""", unsafe_allow_html=True)
+
+    # 渲染唯一的 Radio 导航
+    nav_key = "current_tab"
+    if nav_key not in st.session_state or st.session_state[nav_key] not in all_tabs:
+        st.session_state[nav_key] = all_tabs[0]
+        
+    selected_tab = st.radio(
+        "nav",
+        all_tabs,
+        index=all_tabs.index(st.session_state[nav_key]),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="nav_radio"
+    )
+    if selected_tab != st.session_state[nav_key]:
+        st.session_state[nav_key] = selected_tab
         st.rerun()
 
-    # 移动端底部导航
-    st.markdown('<div class="mobile-nav-marker"></div>', unsafe_allow_html=True)
-    idx_mobile = mobile_tabs.index(st.session_state["current_tab"]) if st.session_state["current_tab"] in mobile_tabs else 0
-    sel_mobile = st.radio("nav_mobile", mobile_tabs, index=idx_mobile, horizontal=True, label_visibility="collapsed", key="nav_mobile_widget")
-    if sel_mobile != st.session_state["current_tab"]:
-        # 如果点的是移动端 Tab，而当前在隐藏 Tab 里，则切换过去
-        if st.session_state["current_tab"] not in mobile_tabs or sel_mobile != st.session_state["current_tab"]:
-            st.session_state["current_tab"] = sel_mobile
-            st.rerun()
-
-    selected_tab = st.session_state["current_tab"]
     view_today = get_user_today(user_tz)
 
     # ============ 内容分发 ============
@@ -2437,8 +2457,6 @@ def run_app(db):
 
 def main():
     st.set_page_config(page_title="学习打卡系统", layout="wide", initial_sidebar_state="expanded")
-    inject_css()
-    
     try:
         db = get_db()
     except Exception as e:
