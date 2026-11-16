@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 【v6 H2+H3 完整修复版】
-# 本次改动：
-#   H2（双花竞态）：新增 lock_user_row()，商城兑换在事务内锁定用户行，杜绝并发双花
-#   H3（SSRF 跳板）：新增 _safe_webhook() 校验，保存与发送双重拦截 loopback/link-local/保留地址
-# 保留：v5 全部功能（7 语言 / H1 考试防刷 / 5 项中危加固 / 系统设置 3-7 编辑模式 / 用户搜索）
+# 【v7 响应式重写版 · 全自动底部导航】
+# 核心保留：DBWrapper / _safe_webhook / lock_user_row / bcrypt / HMAC token / 7 语言 LANG_PACKS
+# 移除：is_mobile_mode 手动切换
+# 新增：CSS @media 响应式（手机→底部导航；桌面→顶部 tab 样式 radio）
 import json, random, os, hashlib, urllib.parse, re, html, requests, secrets, base64, uuid, hmac
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -119,77 +118,58 @@ LANG_PACKS = {
     "weekday_short":["周一","周二","周三","周四","周五","周六","周日"],
 },
 "en": {
-    "language":"Language / 语言","app_title":"Study Check-in",
-    "login":"Login","register":"Register","find_pwd":"Reset Password","username":"Username","password":"Password",
-    "set_username":"Username","set_pwd":"Password","confirm_pwd":"Confirm Password",
-    "security_q":"Security Question","security_a":"Security Answer",
-    "login_btn":"Sign In","register_btn":"Sign Up","reset_btn":"Reset Password",
-    "wrong_creds":"Incorrect username or password","fill_all":"Please fill in all fields","pwd_mismatch":"Passwords do not match",
-    "reserved_name":"This username is reserved.","user_exists":"Username already exists","register_ok":"Registered! 3-day trial.",
-    "no_security_q":"No security question. Please contact admin.","user_not_exist":"Username does not exist",
-    "reset_ok":"Password reset!","wrong_answer":"Wrong answer",
-    "reset_intro":"Enter username, verify security question, then set new password.",
-    "input_username":"Enter username","new_password":"New Password",
-    "pwd_req":"🔐 Password: at least 6 chars, letters+digits recommended; 123456 not allowed",
+    "language":"Language","app_title":"Study Check-in","login":"Login","register":"Sign Up","find_pwd":"Reset",
+    "username":"Username","password":"Password","set_username":"Username","set_pwd":"Password","confirm_pwd":"Confirm Password",
+    "security_q":"Security Question","security_a":"Security Answer","login_btn":"Sign In","register_btn":"Sign Up","reset_btn":"Reset",
+    "wrong_creds":"Wrong credentials","fill_all":"Fill all fields","pwd_mismatch":"Passwords differ","reserved_name":"Reserved name",
+    "user_exists":"User exists","register_ok":"Registered! 3-day trial.","no_security_q":"No security question","user_not_exist":"User not found",
+    "reset_ok":"Password reset!","wrong_answer":"Wrong answer","reset_intro":"Enter username & verify","input_username":"Username",
+    "new_password":"New Password","pwd_req":"🔐 Password: at least 6 chars, letters+digits recommended; 123456 not allowed",
     "pwd_err_empty":"Password cannot be empty","pwd_err_too_short":"Password must be at least 6 characters",
     "pwd_err_too_long":"Password must be at most 72 characters","pwd_err_default":"Default password 123456 is not allowed",
-    "pwd_err_all_digits":"All-digit password not allowed","webhook_unsafe":"❌ Invalid webhook URL: only public http/https allowed",
-    "webhook_saved":"✅ Webhook saved",
-    "op_failed":"Operation failed.","db_failed":"DB connection failed.",
-    "sidebar_title":"Study Check-in","mobile_mode":"📱 Mobile","current_identity":"Signed in as",
-    "local_time":"Local time","makeup_cards":"🎫 Makeup Cards","available_points":"Available Points",
-    "timer":"Focus Timer","badges":"Badges","no_badges":"No badges.","points_detail":"Points",
+    "pwd_err_all_digits":"All-digit password not allowed","webhook_unsafe":"❌ Invalid webhook URL","webhook_saved":"✅ Webhook saved",
+    "op_failed":"Operation failed.","db_failed":"DB connection failed.","sidebar_title":"Study Check-in",
+    "mobile_mode":"📱 Mobile","current_identity":"Signed in as","local_time":"Local time","makeup_cards":"🎫 Makeup Cards",
+    "available_points":"Available Points","timer":"Focus Timer","badges":"Badges","no_badges":"No badges.","points_detail":"Points Detail",
     "checkin_pts":"Check-in","longterm_pts":"Long-term","exam_pts":"Exam","extra_pts":"Extra","special_pts":"Special","spent_pts":"Spent",
     "account_settings":"Account & Data","timezone":"Timezone","select_timezone":"Region / Timezone","custom_tz":"Custom",
     "tz_offset":"UTC offset (hours)","save_tz":"Save Timezone","new_username":"New Username","leave_blank":"Leave blank to keep current",
     "change_username":"Change Username","change_pwd":"Change Password","change_security":"Change Security",
     "new_security_q":"New Security Question","new_security_a":"New Security Answer","save_security":"Save Security",
     "webhook":"Reminder Webhook","save_webhook":"Save Webhook","export_data":"📥 Export (JSON)","logout_btn":"Log Out",
-    "select_child":"Select a child","admin_select_target":"Admin: Select Target",
-    "penetrate":"Drill-down","no_children_bound":"No child bound.",
-    "role_admin":"Admin","role_host":"Parent","role_user":"Child","role_solo":"Solo",
+    "select_child":"Select child","admin_select_target":"Admin: Select Target","penetrate":"Drill-down",
+    "no_children_bound":"No child bound.","role_admin":"Admin","role_host":"Parent","role_user":"Child","role_solo":"Solo",
     "remaining":"Remaining","permanent":"Lifetime","expired":"Expired",
     "tab_checkin":"Check-in","tab_extra":"Extra","tab_history":"History","tab_shop":"Shop","tab_redeem":"Redeem",
     "tab_exam":"Exam","tab_event":"Event","tab_settings":"Settings","tab_leaderboard":"Leaderboard",
     "search_users":"🔍 Search users","search_children":"🔍 Search children","no_match":"No matching user",
     "no_tasks_today":"No tasks today.","basic_req":"Basic","full_req":"Full","today_done":"Today done.",
     "undo_checkin":"Undo today's check-in","base_score":"Base","today_total":"Today Total","est_total":"Estimated",
-    "save_checkin":"Save","saved":"Saved!","bonus":"Bonus",
-    "shop_empty":"Shop empty.","redeem_btn":"Redeem","confirm_deduct":"Confirm Deduct",
+    "save_checkin":"Save","saved":"Saved!","bonus":"Bonus","shop_empty":"Shop empty.","redeem_btn":"Redeem","confirm_deduct":"Confirm",
     "points_insufficient":"Not enough points.","redeem_ok":"Redeemed!","redeem_history":"History","none_yet":"None",
-    "redeem_conflict":"Redemption failed: concurrent operation detected, please refresh.",
-    "cancel":"Cancel","backup_card":"Makeup Card",
-    "history_title":"History & Charts","checkin_hist_detail":"Check-in Detail","select_date":"Select date",
-    "time_view":"Time View","by_day":"Daily","by_week":"Weekly","by_month":"Monthly",
-    "no_data":"No data.","no_record":"No records.","done_items":"Done:",
-    "weekly_report":"### 📊 Weekly Report","week_checkin":"Days this week","week_total":"Weekly total",
-    "day_max":"Day max","gen_report":"📸 Generate Report","save_report":"⬇️ Download",
-    "report_ok":"Report generated.","report_failed":"Failed to generate image.",
-    "makeup_intro":"🎫 **{n} makeup cards available:**","makeup_pick_date":"Pick date",
-    "makeup_pick_tasks":"**Check completed tasks on {d}:**","makeup_submit":"Use 1 card & submit",
-    "makeup_ok":"Makeup succeeded!","makeup_fail":"Makeup failed.","makeup_no_miss":"Full attendance!",
-    "makeup_tip":"💡 Buy makeup cards from shop.","makeup_host_tip":"💡 Done by the child.",
-    "makeup_host_self":"💡 Parent account. Switch to child.",
+    "redeem_conflict":"Conflict, please refresh.","cancel":"Cancel","backup_card":"Makeup Card",
+    "history_title":"History & Charts","checkin_hist_detail":"Detail","select_date":"Date","time_view":"View",
+    "by_day":"Daily","by_week":"Weekly","by_month":"Monthly","no_data":"No data.","no_record":"No records.","done_items":"Done:",
+    "weekly_report":"### 📊 Weekly Report","week_checkin":"Days","week_total":"Weekly total","day_max":"Day max",
+    "gen_report":"📸 Generate","save_report":"⬇️ Download","report_ok":"Report generated.","report_failed":"Failed to generate image.",
+    "makeup_intro":"🎫 **{n} makeup cards available:**","makeup_pick_date":"Pick date","makeup_pick_tasks":"**Check completed tasks on {d}:**",
+    "makeup_submit":"Use 1 card & submit","makeup_ok":"Makeup succeeded!","makeup_fail":"Makeup failed.","makeup_no_miss":"Full attendance!",
+    "makeup_tip":"💡 Buy makeup cards from shop.","makeup_host_tip":"💡 Done by the child.","makeup_host_self":"💡 Parent account.",
     "exam_title":"Exam","exam_no_subject":"No subjects!","exam_score":"(max {max}, target {target})","exam_grade":"(target {target})",
     "exam_ranks":"**Top % in Chinese/Math/English**","exam_cn":"Chinese","exam_ma":"Math","exam_en":"English",
-    "exam_estimate":"### Estimated: **{pts}** pts ({hits} hit)","exam_save":"Save exam result",
-    "exam_saved":"Saved!","exam_hit":"{sub} hit -> +{pts}","exam_over":"  {sub} +{n} tiers -> +{pts}",
-    "exam_up":"  {sub} up {n} -> +{pts}","exam_multi":"{n} subjects -> +{pts}",
-    "exam_rank":"{sub} top {pct}% -> +{pts}","exam_rank_more":"  +{n} tier -> +{pts}",
-    "event_title":"Special Events","event_fired":"Triggered today: {note} +{pts}",
-    "event_confirm":"🎲 Roll today's chance?","event_roll":"Confirm","event_roll_btn":"Roll",
-    "event_got":"Got {pts} points!","event_note":"Point Burst",
-    "extra_title":"Extra Points","extra_name":"Event Name","extra_points":"Points",
-    "extra_submit":"Submit","extra_saved":"Recorded: {name} ({pts})","extra_clear":"Clear","extra_none":"No records",
-    "extra_only_parent":"Only parents/admins.",
+    "exam_estimate":"### Estimated: **{pts}** pts ({hits} hit)","exam_save":"Save exam result","exam_saved":"Saved!",
+    "exam_hit":"{sub} hit -> +{pts}","exam_over":"  {sub} +{n} tiers -> +{pts}","exam_up":"  {sub} up {n} -> +{pts}",
+    "exam_multi":"{n} subjects -> +{pts}","exam_rank":"{sub} top {pct}% -> +{pts}","exam_rank_more":"  +{n} tier -> +{pts}",
+    "event_title":"Special Events","event_fired":"Triggered today: {note} +{pts}","event_confirm":"🎲 Roll today's chance?",
+    "event_roll":"Confirm","event_roll_btn":"Roll","event_got":"Got {pts} points!","event_note":"Point Burst",
+    "extra_title":"Extra Points","extra_name":"Event Name","extra_points":"Points","extra_submit":"Submit",
+    "extra_saved":"Recorded: {name} ({pts})","extra_clear":"Clear","extra_none":"No records","extra_only_parent":"Only parents/admins.",
     "lb_title":"🏆 Sibling Leaderboard","lb_period":"Period","lb_day":"Daily","lb_month":"Monthly","lb_total":"All-time",
     "lb_score":"pts","lb_no_data":"No data","lb_you":"(you)","lb_only_you":"No siblings yet.",
     "redeem_tip_expired":"Trial of [{user}] expired.","redeem_code":"Redeem code","redeem_activate":"Activate",
-    "redeem_invalid":"Invalid code.","redeem_success":"Activated!","redeem_fail":"Activation failed.",
-    "time_arrive":"Time's up!",
-    "exam_already_submitted":"✅ Already submitted today ({time}), +{pts}",
-    "exam_detail_prefix":"Detail: {detail}","exam_one_per_day":"One submission per day.",
-    "exam_duplicate_error":"Already submitted today.",
+    "redeem_invalid":"Invalid code.","redeem_success":"Activated!","redeem_fail":"Activation failed.","time_arrive":"Time's up!",
+    "exam_already_submitted":"✅ Already submitted today ({time}), +{pts}","exam_detail_prefix":"Detail: {detail}",
+    "exam_one_per_day":"One submission per day.","exam_duplicate_error":"Already submitted today.",
     "weekday_short":["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
 },
 "ja": {
@@ -448,8 +428,7 @@ def detect_system_language():
         first = accept.split(",")[0].strip().lower()
         for code in ["zh","en","ja","fr","ru","es","ar"]:
             if first.startswith(code): return code
-    except Exception:
-        pass
+    except Exception: pass
     return "zh"
 
 def get_lang():
@@ -466,14 +445,6 @@ def t(key, **fmt):
         except Exception: return s
     return s
 
-def validate_password_strength(pwd: str) -> str | None:
-    if not pwd: return t("pwd_err_empty")
-    if len(pwd) < 6: return t("pwd_err_too_short")
-    if len(pwd) > 72: return t("pwd_err_too_long")
-    if pwd == "123456": return t("pwd_err_default")
-    if pwd.isdigit(): return t("pwd_err_all_digits")
-    return None
-
 def get_weekday(idx):
     pack = LANG_PACKS.get(get_lang(), LANG_PACKS["zh"])
     return pack.get("weekday_short", LANG_PACKS["zh"]["weekday_short"])[idx % 7]
@@ -488,17 +459,24 @@ def render_language_selector(key_suffix=""):
         return True
     return False
 
-# ==================== 密码与安全区 ====================
+def validate_password_strength(pwd):
+    if not pwd: return t("pwd_err_empty")
+    if len(pwd) < 6: return t("pwd_err_too_short")
+    if len(pwd) > 72: return t("pwd_err_too_long")
+    if pwd == "123456": return t("pwd_err_default")
+    if pwd.isdigit(): return t("pwd_err_all_digits")
+    return None
+
+# ==================== 安全区 ====================
 def get_secret_key():
     try:
         if "SECRET_KEY" in st.secrets and st.secrets["SECRET_KEY"]:
             return str(st.secrets["SECRET_KEY"])
-    except Exception:
-        pass
+    except Exception: pass
     env_key = os.getenv("SECRET_KEY")
     if env_key: return env_key
     temp = secrets.token_hex(32)
-    print("⚠️ 未配置 SECRET_KEY，使用临时随机密钥，重启后所有登录会话将失效。")
+    print("⚠️ 未配置 SECRET_KEY，使用临时随机密钥。")
     return temp
 
 SECRET_KEY = get_secret_key()
@@ -521,8 +499,7 @@ def verify_auth_token(username, token, pwd_hash):
         if int(t_exp) < int(datetime.now(timezone.utc).timestamp()): return False
         expected = hmac.new((SECRET_KEY + pwd_hash).encode(), f"{t_user}|{t_exp}".encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, t_sig)
-    except Exception:
-        return False
+    except Exception: return False
 
 def hash_pwd_sha256(pwd): return hashlib.sha256(pwd.encode()).hexdigest()
 def hash_pwd_bcrypt(pwd): return bcrypt.hashpw(pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -539,47 +516,32 @@ def verify_security_answer(ans, stored):
     except Exception: pass
     return False
 
-# 【H3 修复】Webhook URL 安全校验：拒绝回环/链路本地/保留/组播地址
-def _safe_webhook(url: str) -> tuple[bool, str]:
-    """返回 (是否安全, 错误原因)。拒绝 loopback / link-local / reserved / multicast，允许私网（自建 Bark）。"""
-    if not url:
-        return False, "URL 不能为空"
+# 【H3】Webhook 安全校验
+def _safe_webhook(url):
+    if not url: return False, "URL 不能为空"
     try:
         p = urllib.parse.urlparse(url)
-        if p.scheme not in ("http", "https"):
-            return False, "只允许 http/https 协议"
-        if not p.hostname:
-            return False, "URL 缺少主机名"
-        try:
-            infos = socket.getaddrinfo(p.hostname, None)
-        except socket.gaierror:
-            return False, "无法解析域名"
-        if not infos:
-            return False, "无法解析域名"
+        if p.scheme not in ("http", "https"): return False, "只允许 http/https 协议"
+        if not p.hostname: return False, "URL 缺少主机名"
+        try: infos = socket.getaddrinfo(p.hostname, None)
+        except socket.gaierror: return False, "无法解析域名"
+        if not infos: return False, "无法解析域名"
         for info in infos:
             try:
                 addr = ipaddress.ip_address(info[4][0])
-                if addr.is_loopback:
-                    return False, f"禁止回环地址 {addr}"
-                if addr.is_link_local:
-                    return False, f"禁止链路本地/云元数据地址 {addr}"
-                if addr.is_reserved:
-                    return False, f"禁止保留地址 {addr}"
-                if addr.is_multicast:
-                    return False, f"禁止组播地址 {addr}"
-            except ValueError:
-                return False, "IP 解析异常"
+                if addr.is_loopback: return False, f"禁止回环地址 {addr}"
+                if addr.is_link_local: return False, f"禁止链路本地/云元数据地址 {addr}"
+                if addr.is_reserved: return False, f"禁止保留地址 {addr}"
+                if addr.is_multicast: return False, f"禁止组播地址 {addr}"
+            except ValueError: return False, "IP 解析异常"
         return True, ""
-    except Exception as e:
-        return False, f"校验异常：{e}"
+    except Exception as e: return False, f"校验异常：{e}"
 
-# 【H2 修复】事务内锁定用户行，防止并发双花
-def lock_user_row(db, username: str):
-    """必须在 db.begin() 之后调用；用 no-op 操作获取行锁。"""
+# 【H2】行锁（防双花）
+def lock_user_row(db, username):
     if db.is_cloud:
         db.execute("SELECT 1 FROM users WHERE username=? FOR UPDATE", (username,))
     else:
-        # SQLite 的 no-op UPDATE 会获取 RESERVED 锁，实现写事务串行化
         db.execute("UPDATE users SET makeup_cards = makeup_cards WHERE username=?", (username,))
 
 # ==================== 兼容/运维 ====================
@@ -589,8 +551,7 @@ def _stretch(kwargs):
         sig = inspect.signature(st.button)
         if "width" in sig.parameters: kwargs["width"] = "stretch"
         else: kwargs["use_container_width"] = True
-    except Exception:
-        kwargs["use_container_width"] = True
+    except Exception: kwargs["use_container_width"] = True
     return kwargs
 
 def _submit(label, **kwargs):
@@ -605,33 +566,26 @@ def _log_db_error(op_type, err_msg):
     except Exception: pass
 
 ALL_TABLES = (
-    "users",
-    "daily_records", "period_bonus", "redemptions",
-    "exam_rewards", "special_events", "extra_points",
-    "config_tasks", "config_shop", "config_exam",
-    "config_exam_rules", "config_thresholds", "config_bonus_rules",
-    "config_exam_multihit", "config_badges", "redeem_codes",
+    "users","daily_records","period_bonus","redemptions",
+    "exam_rewards","special_events","extra_points",
+    "config_tasks","config_shop","config_exam",
+    "config_exam_rules","config_thresholds","config_bonus_rules",
+    "config_exam_multihit","config_badges","redeem_codes",
 )
 
-def delete_user_all_data(db, uname: str):
+def delete_user_all_data(db, uname):
     db.execute("UPDATE users SET host_id=NULL WHERE host_id=?", (uname,))
     for tbl in ALL_TABLES:
         if tbl == "redeem_codes":
-            try:
-                db.execute("UPDATE redeem_codes SET used_by=NULL WHERE used_by=?", (uname,))
-            except Exception:
-                pass
+            try: db.execute("UPDATE redeem_codes SET used_by=NULL WHERE used_by=?", (uname,))
+            except Exception: pass
             continue
         col = "username" if tbl == "users" else "owner_id"
-        try:
-            db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
-        except Exception as e:
-            _log_db_error(f"delete_{tbl}", str(e))
+        try: db.execute(f"DELETE FROM {tbl} WHERE {col}=?", (uname,))
+        except Exception as e: _log_db_error(f"delete_{tbl}", str(e))
 
 def _backup_sqlite():
-    if IS_CLOUD:
-        print("ℹ️ 云端模式：无本地 SQLite 备份；请使用系统设置里的『下载完整备份』或配置外部 pg_dump 定时任务。")
-        return
+    if IS_CLOUD: return
     if not DB_PATH.exists(): return
     backup_dir = DB_PATH.parent / "backup"
     backup_dir.mkdir(exist_ok=True)
@@ -648,7 +602,7 @@ def _backup_sqlite():
                     except: pass
         except Exception as e: print(f"备份失败: {e}")
 
-# ==================== 时间引擎 ====================
+# ==================== 时间 ====================
 TIMEZONES = {
     "北京时间 (UTC+8)": 8.0, "东京时间 (UTC+9)": 9.0, "悉尼时间 (UTC+10)": 10.0,
     "伦敦时间 (UTC+0)": 0.0, "巴黎时间 (UTC+1)": 1.0, "纽约时间 (UTC-5)": -5.0,
@@ -680,8 +634,7 @@ def setup_chinese_font():
             url = "https://github.com/StellarCN/scp_zh/raw/master/fonts/SimHei.ttf"
             urllib.request.urlretrieve(url, font_path)
         except Exception as e:
-            print(f"字体下载失败: {e}")
-            return None
+            print(f"字体下载失败: {e}"); return None
     try:
         fm.fontManager.addfont(font_path)
         prop = fm.FontProperties(fname=font_path)
@@ -721,11 +674,8 @@ class DBWrapper:
     def begin(self):
         if self.is_cloud: self.conn.autocommit = False
         else:
-            # SQLite: 用 IMMEDIATE 立即获得写锁，避免 DEFERRED 下的竞态
-            try:
-                self.conn.execute("BEGIN IMMEDIATE")
-            except Exception:
-                self.conn.execute("BEGIN")
+            try: self.conn.execute("BEGIN IMMEDIATE")
+            except Exception: self.conn.execute("BEGIN")
     def rollback(self):
         try: self.conn.rollback()
         except: pass
@@ -832,7 +782,6 @@ def run_legacy_constraint_cleanup(db):
 
 def init_db(db):
     if db.is_cloud: run_legacy_constraint_cleanup(db)
-
     for sql in [
         "CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user', security_question TEXT, security_answer TEXT, webhook_url TEXT, makeup_cards INTEGER DEFAULT 0, timezone_offset REAL DEFAULT 8.0, host_id TEXT, plan_expires_at TEXT, language TEXT)",
         "CREATE TABLE IF NOT EXISTS redeem_codes (code TEXT PRIMARY KEY, days INTEGER, is_used INTEGER DEFAULT 0, used_by TEXT, created_at TEXT)",
@@ -847,7 +796,6 @@ def init_db(db):
     ]:
         try: db.execute(sql)
         except: pass
-
     pk_expr = "SERIAL PRIMARY KEY" if db.is_cloud else "INTEGER PRIMARY KEY AUTOINCREMENT"
     for tname, cols in [
         ("redemptions", "id {pk}, owner_id TEXT, item TEXT, cost REAL, ts TEXT"),
@@ -859,7 +807,6 @@ def init_db(db):
     ]:
         try: db.execute(f"CREATE TABLE IF NOT EXISTS {tname} ({cols.format(pk=pk_expr)})")
         except: pass
-
     for idx in [
         "CREATE INDEX IF NOT EXISTS idx_daily_records ON daily_records (owner_id, day)",
         "CREATE INDEX IF NOT EXISTS idx_period_bonus ON period_bonus (owner_id)",
@@ -871,7 +818,6 @@ def init_db(db):
         try: db.execute(idx)
         except: pass
     db.commit()
-
     if db.is_cloud:
         for q in [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT",
@@ -916,14 +862,12 @@ def init_db(db):
             try: db.execute(q)
             except: pass
         db.commit()
-
     try:
         expire_date = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
         db.execute("UPDATE users SET plan_expires_at=? WHERE plan_expires_at IS NULL AND role IN ('user', 'solo')", (expire_date,))
         db.execute("UPDATE users SET plan_expires_at='2099-12-31 23:59:59' WHERE plan_expires_at IS NULL AND role IN ('admin', 'host')")
         db.commit()
     except Exception as e: print(f"补发老用户试用期失败: {e}")
-
     try:
         user_count = db.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
         if user_count == 0:
@@ -933,14 +877,13 @@ def init_db(db):
             if not admin_pwd:
                 admin_pwd = secrets.token_urlsafe(12); generated = True
             admin_sa = secrets.token_urlsafe(12)
-            print(f"⚠️ 生成初始管理员: {admin_user} / {admin_pwd}" + (" (随机生成)" if generated else ""))
+            print(f"⚠️ 生成初始管理员: {admin_user} / {admin_pwd}")
             db.execute("INSERT INTO users (username, password_hash, role, security_question, security_answer, plan_expires_at) VALUES (?, ?, 'admin', ?, ?, '2099-12-31 23:59:59')",
                        (admin_user, hash_pwd_bcrypt(admin_pwd), "初始密保", hash_security_answer(admin_sa)))
             if not db.execute("SELECT * FROM config_tasks WHERE owner_id=?", (admin_user,)).fetchone():
                 init_old_admin_data(db, admin_user)
             db.commit()
     except Exception as e: print(f"初始化管理员失败: {e}")
-
     try:
         global_badge_count = db.execute("SELECT COUNT(*) as c FROM config_badges WHERE owner_id='system'").fetchone()["c"]
         if global_badge_count == 0:
@@ -991,8 +934,6 @@ def can_manage_others(role): return role in ("admin", "host")
 def can_edit_configs(role): return role in ("admin", "host", "solo")
 def require_admin(role, msg="仅管理员可操作"):
     if not is_admin(role): st.error(msg); st.stop()
-def require_admin_or_host(role, msg="仅管理员或家长可操作"):
-    if not can_manage_others(role): st.error(msg); st.stop()
 
 def _remaining_admins(db, exclude_username):
     try: return db.execute("SELECT COUNT(*) as c FROM users WHERE role='admin' AND username != ?", (exclude_username,)).fetchone()["c"]
@@ -1307,6 +1248,7 @@ def render_timer():
         import streamlit.components.v1 as components
         components.html(timer_html, height=220)
 
+# ==================== 登录 ====================
 def login_page(db):
     st.title(t("app_title"))
     render_language_selector("login_top")
@@ -1396,8 +1338,958 @@ def login_page(db):
                 else: st.error(t("user_not_exist"))
             except RuntimeError: st.error(t("op_failed"))
 
+# ==================== 各 Tab 渲染函数 ====================
+def render_checkin_tab(db, view_as, view_role, view_today, now):
+    try: tasks = get_tasks(view_today.weekday(), view_as)
+    except: tasks = []
+    if not tasks: st.warning(t("no_tasks_today")); return
+    try: thresholds = get_thresholds(view_as); thr = thresholds.get(view_today.weekday(), {"basic":0,"full":0})
+    except: thr = {"basic":0,"full":0}
+    st.subheader(f"{view_today.strftime('%m-%d')} - {get_weekday(view_today.weekday())}")
+    st.caption(f"{t('basic_req')}: {thr['basic']} {t('lb_score')} | {t('full_req')}: {thr['full']} {t('lb_score')}")
+    try: existing = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
+    except: existing = None
+    already_done = existing is not None
+    done_ids = set(json.loads(existing["done_tasks"])) if (existing and existing["done_tasks"]) else set()
+    cats = {}
+    for task in tasks: cats.setdefault(task["category"], []).append(task)
+    selected_ids = []
+    for cat, items in cats.items():
+        st.markdown(f"**{html.escape(cat)}**")
+        cols = st.columns(2)
+        for i, task in enumerate(items):
+            with cols[i % 2]:
+                if st.checkbox(f"{html.escape(task['name'])} ({task['points']}{t('lb_score')})", value=(task["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{task['id']}", disabled=already_done):
+                    if not already_done: selected_ids.append(task["id"])
+    st.divider()
+    c1, c2, c3 = st.columns(3)
+    if already_done:
+        c1.metric(t("base_score"), f"{float(existing['base_score'] or 0):.1f}")
+        c2.metric(t("bonus"), f"{float(existing['bonus_score'] or 0):.1f}")
+        c3.metric(t("today_total"), f"{float(existing['total_score'] or 0):.1f}")
+        st.success(t("today_done"))
+        if st.button(t("undo_checkin"), **_stretch({"type": "secondary"})):
+            try:
+                db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)); db.commit()
+                recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat())
+                st.cache_data.clear(); st.rerun()
+            except RuntimeError: st.error(t("op_failed"))
+    else:
+        base_now = sum(task["points"] for task in tasks if task["id"] in set(selected_ids))
+        try:
+            lookup = {r["day"]: {"base_score": float(r["base_score"] or 0), "basic_thr": float(r.get("basic_thr") or 0), "full_thr": float(r.get("full_thr") or 0)} for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
+            lookup[view_today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
+            bonus, detail = compute_bonus_for_day(view_today, lookup, get_bonus_rules(view_as))
+        except: bonus, detail = 0.0, {}
+        c1.metric(t("base_score"), f"{base_now:.1f}")
+        c2.metric(t("bonus"), f"{bonus:.1f}")
+        c3.metric(t("est_total"), f"{base_now + bonus:.1f}")
+        if st.button(t("save_checkin"), **_stretch({"type": "primary"})):
+            try: save_day(db, view_today, selected_ids, view_as, now.isoformat()); st.success(t("saved")); st.rerun()
+            except RuntimeError: st.error(t("op_failed"))
+
+def render_leaderboard_tab(db, current_user, current_role, user_tz):
+    st.subheader(t("lb_title"))
+    if is_host(current_role):
+        try: lb_children = [r["username"] for r in db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()]
+        except Exception: lb_children = []
+    else:
+        try:
+            my_row = db.execute("SELECT host_id FROM users WHERE username=?", (current_user,)).fetchone()
+            my_host = dict(my_row).get("host_id") if my_row else None
+            if my_host:
+                lb_children = [r["username"] for r in db.execute("SELECT username FROM users WHERE host_id=?", (my_host,)).fetchall()]
+            else: lb_children = [current_user]
+        except Exception: lb_children = [current_user]
+    if not lb_children: st.info(t("lb_no_data")); return
+    if is_user(current_role) and len(lb_children) <= 1: st.info(t("lb_only_you"))
+    period = st.radio(t("lb_period"), options=["day","month","all"],
+        format_func=lambda x: t({"day":"lb_day","month":"lb_month","all":"lb_total"}[x]),
+        horizontal=True, key=f"lb_period_{current_role}")
+    board = get_leaderboard(lb_children, period, user_tz)
+    medals = ["🥇","🥈","🥉"]
+    max_score = max((b["score"] for b in board), default=0) or 1
+    for item in board:
+        rank_icon = medals[item["rank"]-1] if item["rank"] <= 3 else f"#{item['rank']}"
+        is_me = (is_user(current_role) and item["username"] == current_user)
+        nm = html.escape(item["username"])
+        if is_me: nm = f"**{nm}** :orange[**{t('lb_you')}**]"
+        st.markdown(f"**{rank_icon}  {nm}**  —  {item['score']:.1f} {t('lb_score')}")
+        st.progress(min(item["score"] / max_score, 1.0))
+
+def render_extra_tab(db, view_as, current_role, now):
+    if not can_edit_configs(current_role): st.warning(t("extra_only_parent")); return
+    st.subheader(t("extra_title"))
+    with st.form("extra_point_form"):
+        col1, col2, col3 = st.columns([4,2,2])
+        e_name = col1.text_input(t("extra_name"))
+        e_pts = col2.number_input(t("extra_points"), value=1.0, step=0.5)
+        if _submit(t("extra_submit"), **_stretch({"type": "primary"})):
+            if e_name:
+                try:
+                    db.execute("INSERT INTO extra_points (owner_id, name, points, ts) VALUES (?,?,?,?)", (view_as, e_name, e_pts, now.isoformat()))
+                    db.commit(); st.cache_data.clear()
+                    st.success(t("extra_saved", name=html.escape(e_name), pts=e_pts)); st.rerun()
+                except RuntimeError: st.error(t("op_failed"))
+    st.divider()
+    try: ex_rows = db.execute("SELECT * FROM extra_points WHERE owner_id=? ORDER BY id DESC LIMIT 20", (view_as,)).fetchall()
+    except: ex_rows = []
+    if ex_rows:
+        st.dataframe([{"Time": r["ts"], "Event": html.escape(r["name"]), "Pts": float(r["points"] or 0)} for r in ex_rows], use_container_width=True, hide_index=True)
+        if st.button(t("extra_clear"), **_stretch({})):
+            try: db.execute("DELETE FROM extra_points WHERE owner_id=?", (view_as,)); db.commit(); st.cache_data.clear(); st.rerun()
+            except RuntimeError: st.error(t("op_failed"))
+    else: st.caption(t("extra_none"))
+
+def render_history_tab(db, view_as, view_role, current_role, current_user, view_today, now):
+    st.subheader(t("history_title"))
+    view_makeup_hist = get_makeup_cards_of(view_as)
+    if is_host(current_role) and is_user(view_role): st.info(t("makeup_host_tip"))
+    elif is_host(view_role): st.info(t("makeup_host_self"))
+    else:
+        if view_makeup_hist > 0:
+            st.markdown(t("makeup_intro", n=view_makeup_hist))
+            try:
+                missing_dates = [view_today - timedelta(days=i) for i in range(1, 8) if not db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", ((view_today - timedelta(days=i)).isoformat(), view_as)).fetchone()]
+            except: missing_dates = []
+            if missing_dates:
+                sel_date = st.selectbox(t("makeup_pick_date"), missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({get_weekday(x.weekday())})")
+                past_tasks = get_tasks(sel_date.weekday(), view_as)
+                st.write(t("makeup_pick_tasks", d=sel_date.strftime('%m-%d')))
+                with st.form("makeup_form"):
+                    selected_past_ids = [task["id"] for task in past_tasks if st.checkbox(f"{html.escape(task['name'])} ({task['points']}{t('lb_score')})", key=f"makeup_cb_{sel_date}_{task['id']}")]
+                    if _submit(t("makeup_submit"), **_stretch({"type": "primary"})):
+                        db.begin()
+                        try:
+                            cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (view_as,))
+                            if getattr(cur, "rowcount", 0) == 0:
+                                db.rollback(); db.end(); st.error(t("op_failed"))
+                            else:
+                                t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
+                                db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
+                                db.execute("INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
+                                    (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"]))
+                                db.commit(); db.end()
+                                recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat())
+                                st.cache_data.clear(); st.success(t("makeup_ok")); st.rerun()
+                        except Exception:
+                            db.rollback(); db.end(); st.error(t("makeup_fail"))
+            else: st.info(t("makeup_no_miss"))
+        else: st.info(t("makeup_tip"))
+
+    if is_user(view_role) or is_solo(view_role) or (is_admin(current_role) and view_as == current_user):
+        st.divider()
+        st.markdown(t("weekly_report"))
+        start_date = view_today - timedelta(days=6)
+        try:
+            week_records = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? AND day >= ? AND day <= ? ORDER BY day ASC", (view_as, start_date.isoformat(), view_today.isoformat())).fetchall()
+        except: week_records = []
+        full_week = []
+        for i in range(7):
+            d_str = (start_date + timedelta(days=i)).isoformat()
+            rec = next((r for r in week_records if r["day"] == d_str), None)
+            full_week.append({"day": d_str, "total_score": float(rec["total_score"]) if rec else 0.0})
+        week_records = full_week
+        scores = [r["total_score"] for r in week_records]
+        days_count = len([s for s in scores if s > 0]); total_pts = sum(scores)
+        max_daily_score = max(scores) if scores else 0.0
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric(t("week_checkin"), f"{days_count} d")
+        rc2.metric(t("week_total"), f"{total_pts:.1f}")
+        rc3.metric(t("day_max"), f"{max_daily_score:.1f}")
+        if st.button(t("gen_report"), **_stretch({"type": "primary"})):
+            with st.spinner("..."):
+                try:
+                    prop = setup_chinese_font()
+                    dates_labels = [r["day"][5:] for r in week_records]
+                    fig, ax = plt.subplots(figsize=(10, 6), facecolor='#f8f9fa'); ax.set_facecolor('#f8f9fa')
+                    bars = ax.bar(dates_labels, scores, color='#4CAF50', width=0.5, zorder=3)
+                    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False); ax.spines['left'].set_visible(False)
+                    ax.grid(axis='y', linestyle='--', alpha=0.7, zorder=0)
+                    for bar in bars:
+                        yv = bar.get_height()
+                        if yv > 0: ax.text(bar.get_x() + bar.get_width()/2, yv + 0.1, f'{yv:.1f}', ha='center', va='bottom', fontsize=10, fontproperties=prop)
+                    title_text = f"🌟 {view_as} 🌟"
+                    summary_text = f"{t('week_checkin')}: {days_count} | {t('week_total')}: {total_pts:.1f} | {t('day_max')}: {max_daily_score:.1f}"
+                    if prop:
+                        ax.set_title(title_text, fontproperties=prop, fontsize=18, pad=20)
+                        fig.text(0.5, 0.88, summary_text, ha='center', fontsize=13, fontproperties=prop)
+                        plt.xticks(fontproperties=prop); plt.yticks(fontproperties=prop)
+                    else:
+                        ax.set_title(title_text, fontsize=18, pad=20)
+                        fig.text(0.5, 0.88, summary_text, ha='center', fontsize=13)
+                    plt.tight_layout(rect=[0,0,1,0.85])
+                    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200, bbox_inches="tight"); buf.seek(0); plt.close(fig)
+                    st.image(buf, use_container_width=True)
+                    st.download_button(t("save_report"), data=buf, file_name=f"{view_as}_weekly_{start_date.isoformat()}.png", mime="image/png", **_stretch({"type":"secondary"}))
+                    st.success(t("report_ok"))
+                except Exception: st.error(t("report_failed"))
+
+    st.divider()
+    time_view = st.radio(t("time_view"), [t("by_day"), t("by_week"), t("by_month")], horizontal=True, key="time_view_radio")
+    try: all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
+    except: all_recs = []
+    if all_recs:
+        df = pd.DataFrame([{"Date": r["day"], "Score": float(r["total_score"] or 0)} for r in all_recs])
+        df["Date"] = pd.to_datetime(df["Date"])
+        if time_view == t("by_day"): df_grouped = df.copy(); x_title = t("by_day")
+        elif time_view == t("by_week"): df_grouped = df.set_index("Date").resample('W-MON', label='left', closed='left').sum().reset_index(); x_title = t("by_week")
+        else: df_grouped = df.set_index("Date").resample('MS').sum().reset_index(); x_title = t("by_month")
+        st.altair_chart(alt.Chart(df_grouped).mark_line(point=True, color='#1f77b4').encode(x=alt.X('Date:T', title=x_title, axis=alt.Axis(labelAngle=0)), y=alt.Y('Score:Q', title=t("lb_score"), axis=alt.Axis(labelAngle=0)), tooltip=[alt.Tooltip('Date:T', format='%Y-%m-%d'), 'Score:Q']).interactive(), use_container_width=True)
+        st.altair_chart(alt.Chart(df_grouped).mark_bar().encode(x=alt.X('Date:T', title=x_title, axis=alt.Axis(labelAngle=0)), y=alt.Y('Score:Q', title=t("lb_score"), axis=alt.Axis(labelAngle=0)), color=alt.Color('Score:Q', scale=alt.Scale(scheme='greens'), legend=None), tooltip=[alt.Tooltip('Date:T', format='%Y-%m-%d'), 'Score:Q']), use_container_width=True)
+    else: st.info(t("no_data"))
+
+    st.divider(); st.subheader(t("checkin_hist_detail"))
+    try: days = [r["day"] for r in db.execute("SELECT day FROM daily_records WHERE owner_id=? ORDER BY day DESC", (view_as,)).fetchall()]
+    except: days = []
+    if days:
+        sel = st.selectbox(t("select_date"), days, key="hist_day_sel")
+        try:
+            row = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (sel, view_as)).fetchone()
+            st.write(f"**{t('today_total')}: {float(row['total_score'] or 0):.1f}** ({t('base_score')} {float(row['base_score'] or 0):.1f} + {t('bonus')} {float(row['bonus_score'] or 0):.1f})")
+            done = json.loads(row["done_tasks"]) if row["done_tasks"] else []
+            st.write(t("done_items"), ", ".join([html.escape(task["name"]) for task in get_tasks(date.fromisoformat(sel).weekday(), view_as) if task["id"] in done]) or t("none_yet"))
+        except: pass
+    else: st.info(t("no_record"))
+
+def render_shop_tab(db, view_as, now):
+    st.subheader(t("tab_shop"))
+    try: shop_items = get_shop(view_as)
+    except: shop_items = []
+    if not shop_items: st.warning(t("shop_empty")); return
+    try: bal = get_balance(view_as)
+    except: bal = {"balance": 0}
+    for name, cost in shop_items:
+        display_name = t("backup_card") if name == "补签卡" else name
+        c1, c2, c3 = st.columns([5,2,2])
+        c1.write(f"**{html.escape(display_name)}**"); c2.write(f"`{cost} {t('lb_score')}`")
+        ck = f"confirm_buy_{view_as}_{name}"
+        if st.session_state.get(ck):
+            cc1, cc2 = st.columns(2)
+            if cc1.button(t("confirm_deduct"), key=f"yes_{view_as}_{name}", **_stretch({"type":"primary"})):
+                # 【H2】事务 + 行锁
+                db.begin()
+                try:
+                    lock_user_row(db, view_as)
+                    q = "SELECT (SELECT COALESCE(SUM(total_score),0) FROM daily_records WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM period_bonus WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM exam_rewards WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM special_events WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM extra_points WHERE owner_id=?)-(SELECT COALESCE(SUM(cost),0) FROM redemptions WHERE owner_id=?) AS bal"
+                    row = db.execute(q, (view_as,view_as,view_as,view_as,view_as,view_as)).fetchone()
+                    if float(row["bal"] or 0) < cost:
+                        db.rollback(); db.end(); st.error(t("points_insufficient"))
+                    else:
+                        db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
+                        if name == "补签卡": db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
+                        db.commit(); db.end()
+                        st.session_state[ck] = False; st.cache_data.clear(); st.success(t("redeem_ok")); st.rerun()
+                except Exception as e:
+                    try: db.rollback(); db.end()
+                    except: pass
+                    _log_db_error("shop_redeem", str(e))
+                    st.error(t("redeem_conflict"))
+            if cc2.button(t("cancel"), key=f"no_{view_as}_{name}", **_stretch({})):
+                st.session_state[ck] = False; st.rerun()
+        else:
+            if c3.button(t("redeem_btn"), key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost), **_stretch({})):
+                st.session_state[ck] = True; st.rerun()
+
+def render_redeem_tab(db, view_as):
+    st.subheader(t("redeem_history"))
+    try: rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
+    except: rows = []
+    if rows:
+        st.dataframe([{"Time": r["ts"], "Reward": html.escape(r["item"]), "Cost": float(r["cost"] or 0)} for r in rows], use_container_width=True)
+    else: st.info(t("none_yet"))
+
+def render_exam_tab(db, view_as, now):
+    st.subheader(t("exam_title"))
+    try: exam_config, _ = get_exam_config(view_as)
+    except: exam_config = {}
+    if not exam_config: st.warning(t("exam_no_subject")); return
+    today_str_for_exam = now.date().isoformat()
+    try:
+        submitted_today = db.execute(
+            "SELECT id, detail, points, ts FROM exam_rewards WHERE owner_id=? AND substr(ts, 1, 10)=? ORDER BY id DESC LIMIT 1",
+            (view_as, today_str_for_exam)
+        ).fetchone()
+    except Exception:
+        submitted_today = None
+    if submitted_today:
+        time_part = str(submitted_today["ts"] or "")[11:16] or "?"
+        pts_part = float(submitted_today["points"] or 0)
+        st.info(t("exam_already_submitted", time=time_part, pts=f"{pts_part:.1f}"))
+        st.caption(t("exam_detail_prefix", detail=html.escape(str(submitted_today["detail"] or ""))))
+        st.caption(t("exam_one_per_day"))
+        return
+    scores = {}; ranks = {}
+    subj_list = list(exam_config.keys())
+    for i in range(0, len(subj_list), 3):
+        cols = st.columns(3)
+        for j in range(3):
+            if i + j < len(subj_list):
+                sub = subj_list[i+j]; cfg = exam_config[sub]
+                with cols[j]:
+                    if cfg["type"] == "score":
+                        max_s = float(cfg.get("max_score", 150))
+                        scores[sub] = st.number_input(html.escape(sub) + " " + t("exam_score", max=max_s, target=cfg['target']), min_value=0.0, max_value=max_s, value=float(cfg.get('target', 0)), key=f"ex_{view_as}_{sub}")
+                    else:
+                        ti = GRADES.index(cfg['target']) if cfg['target'] in GRADES else 0
+                        scores[sub] = st.selectbox(html.escape(sub) + " " + t("exam_grade", target=cfg['target']), GRADES, index=ti, key=f"ex_sel_{view_as}_{sub}")
+    st.write(t("exam_ranks"))
+    c1, c2, c3 = st.columns(3)
+    ranks["语文"] = c1.number_input(t("exam_cn"), 0.0, 100.0, 100.0, key=f"rk_cn_{view_as}")
+    ranks["数学"] = c2.number_input(t("exam_ma"), 0.0, 100.0, 100.0, key=f"rk_ma_{view_as}")
+    ranks["英语"] = c3.number_input(t("exam_en"), 0.0, 100.0, 100.0, key=f"rk_en_{view_as}")
+    total_pts, lines, hit_count = calc_exam_bonus(scores, ranks, view_as)
+    st.divider()
+    st.markdown(t("exam_estimate", pts=f"{total_pts:.1f}", hits=hit_count))
+    for ln in lines: st.write(ln)
+    if st.button(t("exam_save"), **_stretch({"type": "primary"})):
+        try:
+            again = db.execute("SELECT id FROM exam_rewards WHERE owner_id=? AND substr(ts, 1, 10)=?", (view_as, today_str_for_exam)).fetchone()
+            if again: st.error(t("exam_duplicate_error"))
+            else:
+                detail_text = f"hit={hit_count} | " + "/".join([f"{k}:{v}" for k, v in scores.items()])
+                db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
+                db.commit(); st.cache_data.clear(); st.success(t("exam_saved")); st.rerun()
+        except RuntimeError: st.error(t("op_failed"))
+
+def render_event_tab(db, view_as, view_today, now):
+    st.subheader(t("event_title"))
+    try: fired = db.execute("SELECT * FROM special_events WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
+    except: fired = None
+    if fired:
+        st.info(t("event_fired", note=html.escape(fired['note']), pts=float(fired['points'] or 0)))
+        return
+    if st.session_state.get("confirm_roll"):
+        st.warning(t("event_confirm"))
+        rc1, rc2 = st.columns(2)
+        if rc1.button(t("event_roll"), **_stretch({"type": "primary"})):
+            try:
+                roll = random.random()
+                pts = random.randint(1,2) if roll < 0.4 else random.randint(3,5) if roll < 0.8 else random.randint(6,8) if roll < 0.95 else random.randint(10,15)
+                db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (view_today.isoformat(), view_as, pts, t("event_note"), now.isoformat()))
+                db.commit(); st.session_state["confirm_roll"] = False; st.cache_data.clear(); st.balloons(); st.success(t("event_got", pts=pts)); st.rerun()
+            except RuntimeError: st.error(t("op_failed"))
+        if rc2.button(t("cancel"), **_stretch({})): st.session_state["confirm_roll"] = False; st.rerun()
+    else:
+        if st.button(t("event_roll_btn"), **_stretch({})): st.session_state["confirm_roll"] = True; st.rerun()
+
+def render_settings_tab(db, view_as, view_role, current_role, current_user, user_row, all_users_data, user_tz):
+    st.subheader(t("tab_settings"))
+    role_names = {"admin":t("role_admin"),"host":t("role_host"),"user":t("role_user"),"solo":t("role_solo")}
+    if view_as == current_user: st.info(f"{html.escape(view_as)}")
+    else: st.info(f"{html.escape(view_as)} ({role_names.get(view_role, view_role)})")
+
+    # 移动端必需：语言 + 时区 + 登出（原来在 sidebar 里）
+    with st.expander("🌐 " + t("language"), expanded=False):
+        render_language_selector("settings")
+        if st.session_state.get("lang") and user_row.get("language") != st.session_state["lang"]:
+            try:
+                db.execute("UPDATE users SET language=? WHERE username=?", (st.session_state["lang"], current_user)); db.commit()
+            except: pass
+    with st.expander("⏰ " + t("timezone"), expanded=False):
+        curr_tz_name = next((k for k, v in TIMEZONES.items() if v == user_tz), "自定义时区")
+        new_tz_name = st.selectbox(t("select_timezone"), list(TIMEZONES.keys()), index=list(TIMEZONES.keys()).index(curr_tz_name), key="settings_tz")
+        if new_tz_name == "自定义时区":
+            final_tz = st.number_input(t("tz_offset"), value=float(user_tz), step=0.5, min_value=-12.0, max_value=14.0, key="settings_tz_off")
+        else: final_tz = TIMEZONES[new_tz_name]
+        if st.button(t("save_tz"), key="settings_save_tz", **_stretch({})):
+            try: db.execute("UPDATE users SET timezone_offset=? WHERE username=?", (final_tz, current_user)); db.commit(); st.success("OK"); st.rerun()
+            except RuntimeError: st.error(t("op_failed"))
+    with st.expander("🔐 " + t("account_settings"), expanded=False):
+        new_name = st.text_input(t("new_username"), placeholder=t("leave_blank"), max_chars=20, key="settings_new_name")
+        if st.button(t("change_username"), key="settings_change_name", **_stretch({})):
+            if new_name and new_name != current_user:
+                if new_name.lower() in ["system","admin"]: st.error(t("reserved_name"))
+                else:
+                    try:
+                        if db.execute("SELECT * FROM users WHERE username=?", (new_name,)).fetchone(): st.error(t("user_exists"))
+                        else:
+                            db.begin()
+                            try:
+                                for tbl in ["daily_records","period_bonus","redemptions","exam_rewards","special_events","extra_points","config_tasks","config_shop","config_exam","config_exam_rules","config_thresholds","config_bonus_rules","config_exam_multihit"]:
+                                    db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
+                                db.execute("UPDATE users SET host_id=? WHERE host_id=?", (new_name, current_user))
+                                db.execute("UPDATE redeem_codes SET used_by=? WHERE used_by=?", (new_name, current_user))
+                                db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
+                                db.commit(); db.end()
+                                st.session_state.user = new_name
+                                st.query_params["user"] = new_name
+                                st.query_params["auth"] = generate_auth_token(new_name, user_row["password_hash"])
+                                st.cache_data.clear(); st.success("OK"); st.rerun()
+                            except Exception:
+                                db.rollback(); db.end(); st.error(t("op_failed"))
+                    except RuntimeError: st.error(t("op_failed"))
+        new_pwd = st.text_input(t("new_password"), type="password", key="settings_new_pwd", max_chars=72)
+        st.caption(t("pwd_req"))
+        if st.button(t("change_pwd"), key="settings_change_pwd", **_stretch({})):
+            if new_pwd:
+                err = validate_password_strength(new_pwd)
+                if err: st.error(err); st.stop()
+                try:
+                    new_hash = hash_pwd_bcrypt(new_pwd)
+                    db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, current_user))
+                    db.commit()
+                    st.query_params["auth"] = generate_auth_token(current_user, new_hash)
+                    st.success("OK")
+                except RuntimeError: st.error(t("op_failed"))
+        new_sq = st.text_input(t("new_security_q"), max_chars=50, key="settings_sq")
+        new_sa = st.text_input(t("new_security_a"), max_chars=50, key="settings_sa")
+        if st.button(t("save_security"), key="settings_save_sq", **_stretch({})):
+            if not new_sq or not new_sa: st.error(t("fill_all"))
+            else:
+                try:
+                    db.execute("UPDATE users SET security_question=?, security_answer=? WHERE username=?", (new_sq, hash_security_answer(new_sa), current_user))
+                    db.commit(); st.success("OK")
+                except RuntimeError: st.error(t("op_failed"))
+        webhook_input = st.text_input(t("webhook"), value=user_row.get("webhook_url") or "", placeholder="https://...", key="settings_webhook")
+        if st.button(t("save_webhook"), key="settings_save_webhook", **_stretch({})):
+            if webhook_input:
+                safe, reason = _safe_webhook(webhook_input)
+                if not safe: st.error(f"{t('webhook_unsafe')}: {reason}")
+                else:
+                    try:
+                        db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user)); db.commit(); st.success(t("webhook_saved"))
+                    except RuntimeError: st.error(t("op_failed"))
+            else:
+                try:
+                    db.execute("UPDATE users SET webhook_url=? WHERE username=?", ("", current_user)); db.commit(); st.success("OK")
+                except RuntimeError: st.error(t("op_failed"))
+        try:
+            my_data = {
+                "daily_records": [dict(r) for r in db.execute("SELECT * FROM daily_records WHERE owner_id=?", (current_user,)).fetchall()],
+                "exam_rewards": [dict(r) for r in db.execute("SELECT * FROM exam_rewards WHERE owner_id=?", (current_user,)).fetchall()],
+                "redemptions": [dict(r) for r in db.execute("SELECT * FROM redemptions WHERE owner_id=?", (current_user,)).fetchall()],
+                "extra_points": [dict(r) for r in db.execute("SELECT * FROM extra_points WHERE owner_id=?", (current_user,)).fetchall()],
+                "special_events": [dict(r) for r in db.execute("SELECT * FROM special_events WHERE owner_id=?", (current_user,)).fetchall()]
+            }
+            st.download_button(t("export_data"), data=json.dumps(my_data, ensure_ascii=False, indent=2, default=str), file_name=f"backup_{current_user}.json", mime="application/json", key="settings_export", **_stretch({}))
+        except: pass
+    if st.button("🚪 " + t("logout_btn"), key="settings_logout", **_stretch({"type": "secondary"})):
+        for k in ["user", "role"]:
+            st.session_state.pop(k, None)
+        st.query_params.clear(); st.rerun()
+
+    # 1. 修改每日任务
+    st.divider(); st.markdown("### 1. 修改每日任务")
+    sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: get_weekday(x), key="set_wd")
+    try: tasks_list = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=? ORDER BY category ASC, name ASC", (sel_wd, view_as)).fetchall()
+    except: tasks_list = []
+    edit_mode_key = f"task_edit_mode_{view_as}_{sel_wd}"
+    if edit_mode_key not in st.session_state: st.session_state[edit_mode_key] = False
+    header_cols = st.columns([3,1])
+    header_cols[0].markdown(f"**{get_weekday(sel_wd)} ({len(tasks_list)})**")
+    if header_cols[1].button("完成编辑" if st.session_state[edit_mode_key] else "✏️ 编辑", key=f"toggle_edit_{view_as}_{sel_wd}"):
+        st.session_state[edit_mode_key] = not st.session_state[edit_mode_key]; st.rerun()
+    selected_task_ids = []
+    if tasks_list:
+        for task in tasks_list:
+            if st.session_state[edit_mode_key]:
+                c1, c2, c3, c4 = st.columns([1,2,4,2])
+                if c1.checkbox("", key=f"chk_{view_as}_{sel_wd}_{task['id']}", label_visibility="collapsed"): selected_task_ids.append(task["id"])
+                c2.write(f"`{html.escape(str(task.get('category') or ''))}`"); c3.write(f"**{html.escape(str(task['name']))}**"); c4.write(f"{float(task['points'] or 0)}")
+            else:
+                c1, c2, c3 = st.columns([2,4,2])
+                c1.write(f"`{html.escape(str(task.get('category') or ''))}`"); c2.write(f"**{html.escape(str(task['name']))}**"); c3.write(f"{float(task['points'] or 0)}")
+        if st.session_state[edit_mode_key] and selected_task_ids:
+            st.write(f"已选中 **{len(selected_task_ids)}** 项")
+            if st.button("🗑 删除选中任务", key=f"del_tasks_{view_as}_{sel_wd}", **_stretch({"type": "primary"})):
+                db.begin()
+                try:
+                    ph = ",".join(["?"] * len(selected_task_ids))
+                    db.execute(f"DELETE FROM config_tasks WHERE id IN ({ph}) AND owner_id=?", (*selected_task_ids, view_as))
+                    db.commit(); db.end(); st.cache_data.clear(); st.success("OK"); st.rerun()
+                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
+    with st.form(f"add_task_form_{view_as}_{sel_wd}", clear_on_submit=True):
+        st.markdown("**➕ 新增任务**")
+        tc1, tc2, tc3 = st.columns([2,3,2])
+        new_cat = tc1.text_input("分类", key=f"new_task_cat_{view_as}_{sel_wd}")
+        new_name = tc2.text_input("任务名称", key=f"new_task_name_{view_as}_{sel_wd}")
+        new_pts_str = tc3.text_input("分数", key=f"new_task_pts_{view_as}_{sel_wd}")
+        if _submit("➕ 添加任务", **_stretch({"type": "primary"})):
+            if not new_name.strip(): st.error("不能为空")
+            else:
+                try: pv = float((new_pts_str or "0").strip() or "0")
+                except ValueError: st.error("数字")
+                else:
+                    try:
+                        db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (uuid.uuid4().hex, sel_wd, view_as, new_cat.strip(), new_name.strip(), pv))
+                        db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
+                    except RuntimeError: st.error(t("op_failed"))
+
+    # 2. 商城奖励
+    st.divider(); st.markdown("### 2. 修改商城奖励")
+    try: shop_list = db.execute("SELECT * FROM config_shop WHERE owner_id=? ORDER BY id ASC", (view_as,)).fetchall()
+    except: shop_list = []
+    edit_shop_key = f"shop_edit_mode_{view_as}"
+    if edit_shop_key not in st.session_state: st.session_state[edit_shop_key] = False
+    header_cols = st.columns([3,1])
+    header_cols[0].markdown(f"**商城奖励 ({len(shop_list)})**")
+    if header_cols[1].button("完成编辑" if st.session_state[edit_shop_key] else "✏️ 编辑", key=f"toggle_edit_shop_{view_as}"):
+        st.session_state[edit_shop_key] = not st.session_state[edit_shop_key]; st.rerun()
+    selected_shop_ids = []
+    if shop_list:
+        for s in shop_list:
+            if st.session_state[edit_shop_key]:
+                c1, c2, c3 = st.columns([1,5,2])
+                if c1.checkbox("", key=f"chk_shop_{view_as}_{s['id']}", label_visibility="collapsed"): selected_shop_ids.append(s["id"])
+                c2.write(f"**{html.escape(str(s['name']))}**"); c3.write(f"{float(s['cost'] or 0)}")
+            else:
+                c1, c2 = st.columns([5,2])
+                c1.write(f"**{html.escape(str(s['name']))}**"); c2.write(f"{float(s['cost'] or 0)}")
+        if st.session_state[edit_shop_key] and selected_shop_ids:
+            if st.button("🗑 删除选中奖励", key=f"del_shop_btn_{view_as}", **_stretch({"type":"primary"})):
+                db.begin()
+                try:
+                    ph = ",".join(["?"] * len(selected_shop_ids))
+                    db.execute(f"DELETE FROM config_shop WHERE id IN ({ph}) AND owner_id=?", (*selected_shop_ids, view_as))
+                    db.commit(); db.end(); st.cache_data.clear(); st.success("OK"); st.rerun()
+                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
+    with st.form(f"add_shop_form_{view_as}", clear_on_submit=True):
+        st.markdown("**➕ 新增奖励**")
+        sc1, sc2 = st.columns([3,2])
+        new_shop_name = sc1.text_input("奖励名称", key=f"new_shop_name_{view_as}")
+        new_shop_cost_str = sc2.text_input("所需积分", key=f"new_shop_cost_{view_as}")
+        if _submit("➕ 添加奖励", **_stretch({"type": "primary"})):
+            if not new_shop_name.strip(): st.error("不能为空")
+            else:
+                try: cv = float((new_shop_cost_str or "0").strip() or "0")
+                except ValueError: st.error("数字")
+                else:
+                    try:
+                        db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (view_as, new_shop_name.strip(), cv))
+                        db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
+                    except RuntimeError: st.error(t("op_failed"))
+
+    # 3. 考试科目
+    st.divider(); st.markdown("### 3. 修改考试科目")
+    try: exam_config, _ = get_exam_config(view_as)
+    except: exam_config = {}
+    edit_exam_key = f"exam_edit_mode_{view_as}"
+    if edit_exam_key not in st.session_state: st.session_state[edit_exam_key] = False
+    header_cols = st.columns([3, 1])
+    header_cols[0].markdown(f"**考试科目（共 {len(exam_config)} 项）**")
+    if header_cols[1].button("完成编辑" if st.session_state[edit_exam_key] else "✏️ 编辑", key=f"toggle_edit_exam_{view_as}"):
+        st.session_state[edit_exam_key] = not st.session_state[edit_exam_key]; st.rerun()
+    selected_exam_subs = []
+    if exam_config:
+        for sub, cfg in exam_config.items():
+            if st.session_state[edit_exam_key]:
+                c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
+                if c1.checkbox("", key=f"chk_exam_{view_as}_{sub}", label_visibility="collapsed"): selected_exam_subs.append(sub)
+                c2.write(f"**{html.escape(sub)}**")
+                if cfg.get("type") == "score": c3.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                else: c3.write(f"等级制 | 目标 {cfg.get('target')}")
+                c4.write(f"单档 {cfg.get('step_points', 0)} 分")
+            else:
+                c1, c2, c3 = st.columns([2, 5, 2])
+                c1.write(f"**{html.escape(sub)}**")
+                if cfg.get("type") == "score": c2.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
+                else: c2.write(f"等级制 | 目标 {cfg.get('target')}")
+                c3.write(f"单档 {cfg.get('step_points', 0)} 分")
+        if st.session_state[edit_exam_key] and selected_exam_subs:
+            if st.button("🗑 删除选中科目", key=f"del_exam_btn_{view_as}", **_stretch({"type": "primary"})):
+                db.begin()
+                try:
+                    for sub in selected_exam_subs:
+                        db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (sub, view_as))
+                    db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
+                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
+    with st.form(f"add_exam_form_{view_as}", clear_on_submit=True):
+        st.markdown("**➕ 新增科目（分数制）**")
+        ec1, ec2, ec3 = st.columns(3)
+        new_sub = ec1.text_input("科目名称", key=f"new_exam_sub_{view_as}")
+        new_max = ec2.text_input("满分", value="150", key=f"new_exam_max_{view_as}")
+        new_tgt = ec3.text_input("目标", value="105", key=f"new_exam_tgt_{view_as}")
+        ec4, ec5 = st.columns(2)
+        new_step = ec4.text_input("分差", value="3", key=f"new_exam_step_{view_as}")
+        new_sp = ec5.text_input("单档奖励", value="2", key=f"new_exam_sp_{view_as}")
+        if _submit("➕ 添加科目", **_stretch({"type": "primary"})):
+            if not new_sub.strip(): st.error("不能为空")
+            else:
+                try:
+                    cfg = {"type":"score","max_score":float(new_max),"target":float(new_tgt),"step":float(new_step),"step_points":float(new_sp)}
+                    db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_sub.strip(), view_as, json.dumps(cfg)))
+                    db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
+                except (ValueError, RuntimeError): st.error(t("op_failed"))
+
+    # 4. 多科奖励
+    st.divider(); st.markdown("### 4. 修改多科达成奖励")
+    try: mh_list = get_exam_multihit(view_as)
+    except: mh_list = []
+    edit_mh_key = f"mh_edit_mode_{view_as}"
+    if edit_mh_key not in st.session_state: st.session_state[edit_mh_key] = False
+    header_cols = st.columns([3, 1])
+    header_cols[0].markdown(f"**多科奖励（共 {len(mh_list)} 项）**")
+    if header_cols[1].button("完成编辑" if st.session_state[edit_mh_key] else "✏️ 编辑", key=f"toggle_edit_mh_{view_as}"):
+        st.session_state[edit_mh_key] = not st.session_state[edit_mh_key]; st.rerun()
+    selected_mh_counts = []
+    if mh_list:
+        for mh in mh_list:
+            if st.session_state[edit_mh_key]:
+                c1, c2, c3 = st.columns([1, 4, 3])
+                if c1.checkbox("", key=f"chk_mh_{view_as}_{mh['hit_count']}", label_visibility="collapsed"): selected_mh_counts.append(mh["hit_count"])
+                c2.write(f"达成 **{mh['hit_count']}** 门及以上"); c3.write(f"+{mh['points']} 分")
+            else:
+                c1, c2 = st.columns([4, 3])
+                c1.write(f"达成 **{mh['hit_count']}** 门及以上"); c2.write(f"+{mh['points']} 分")
+        if st.session_state[edit_mh_key] and selected_mh_counts:
+            if st.button("🗑 删除选中档位", key=f"del_mh_btn_{view_as}", **_stretch({"type": "primary"})):
+                db.begin()
+                try:
+                    for hc in selected_mh_counts:
+                        db.execute("DELETE FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (hc, view_as))
+                    db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
+                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
+    with st.form(f"add_mh_form_{view_as}", clear_on_submit=True):
+        st.markdown("**➕ 新增多科奖励**")
+        mc1, mc2 = st.columns(2)
+        nmc = mc1.text_input("达成科目数", key=f"new_mh_count_{view_as}")
+        nmp = mc2.text_input("奖励分数", value="2", key=f"new_mh_pts_{view_as}")
+        if _submit("➕ 添加档位", **_stretch({"type": "primary"})):
+            try:
+                cv = int(nmc.strip()); pv = float(nmp.strip())
+                db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (cv, view_as, pv))
+                db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
+            except (ValueError, RuntimeError): st.error(t("op_failed"))
+
+    # 5. 阈值
+    st.divider(); st.markdown("### 5. 阈值与 Bonus 规则")
+    try: thresholds = get_thresholds(view_as); bonus_rules = get_bonus_rules(view_as)
+    except: thresholds = {}; bonus_rules = DEFAULT_BONUS_RULES
+    edit_bonus_key = f"bonus_edit_mode_{view_as}"
+    if edit_bonus_key not in st.session_state: st.session_state[edit_bonus_key] = False
+    header_cols = st.columns([3, 1])
+    header_cols[0].markdown("**阈值与 Bonus 规则**")
+    if header_cols[1].button("完成编辑" if st.session_state[edit_bonus_key] else "✏️ 编辑", key=f"toggle_edit_bonus_{view_as}"):
+        st.session_state[edit_bonus_key] = not st.session_state[edit_bonus_key]; st.rerun()
+    if not st.session_state[edit_bonus_key]:
+        t_cols = st.columns(7)
+        for i in range(7):
+            with t_cols[i]:
+                tt = thresholds.get(i, {"basic":0,"full":0})
+                st.caption(f"**{get_weekday(i)}**")
+                st.write(f"基 {tt['basic']} / 满 {tt['full']}")
+        lt = bonus_rules["longterm"]
+        st.caption(f"周达标 {lt['week_basic']} / 周满 {lt['week_full']} / 月达标 {lt['month_basic']} / 月满 {lt['month_full']}")
+    else:
+        with st.form(f"bonus_form_{view_as}"):
+            t_cols = st.columns(7); tinp = {}
+            for i in range(7):
+                with t_cols[i]:
+                    st.markdown(f"**{get_weekday(i)}**")
+                    tinp[i] = {"basic": st.number_input("基本", value=float(thresholds.get(i,{"basic":0})["basic"]), key=f"th_b_{view_as}_{i}"), "full": st.number_input("满分", value=float(thresholds.get(i,{"full":0})["full"]), key=f"th_f_{view_as}_{i}")}
+            c1, c2 = st.columns(2)
+            with c1:
+                wd_single = st.number_input("单日达标", value=float(bonus_rules["weekday"]["single"]["points"]), step=0.5, key=f"b1_{view_as}")
+                wd_single_full = st.number_input("单日满分", value=float(bonus_rules["weekday"]["single"]["full_points"]), step=0.5, key=f"b2_{view_as}")
+                wd_2 = st.number_input("连2达标", value=float(bonus_rules["weekday"]["streak2"]["points"]), step=0.5, key=f"b3_{view_as}")
+                wd_2_full = st.number_input("连2满分", value=float(bonus_rules["weekday"]["streak2"]["full_points"]), step=0.5, key=f"b4_{view_as}")
+                wd_4 = st.number_input("连4达标", value=float(bonus_rules["weekday"]["streak4"]["points"]), step=0.5, key=f"b5_{view_as}")
+                wd_4_full = st.number_input("连4满分", value=float(bonus_rules["weekday"]["streak4"]["full_points"]), step=0.5, key=f"b6_{view_as}")
+            with c2:
+                we_single = st.number_input("周末单日达标", value=float(bonus_rules["weekend"]["single"]["points"]), step=0.5, key=f"b7_{view_as}")
+                we_single_full = st.number_input("周末单日满分", value=float(bonus_rules["weekend"]["single"]["full_points"]), step=0.5, key=f"b8_{view_as}")
+                lt_wb = st.number_input("整周达标", value=float(bonus_rules["longterm"]["week_basic"]), step=0.5, key=f"b9_{view_as}")
+                lt_wf = st.number_input("完美一周", value=float(bonus_rules["longterm"]["week_full"]), step=0.5, key=f"b10_{view_as}")
+                lt_mb = st.number_input("整月达标", value=float(bonus_rules["longterm"]["month_basic"]), step=0.5, key=f"b11_{view_as}")
+                lt_mf = st.number_input("完美一月", value=float(bonus_rules["longterm"]["month_full"]), step=0.5, key=f"b12_{view_as}")
+                flex_p = st.number_input("弹性完美扣减", value=float(bonus_rules["longterm"].get("week_flex_perfect_deduct",1.0)), step=0.5, key=f"b13_{view_as}")
+                flex_b = st.number_input("弹性达标扣减", value=float(bonus_rules["longterm"].get("week_flex_basic_deduct",0.5)), step=0.5, key=f"b14_{view_as}")
+            if _submit("保存新规则", **_stretch({"type": "primary"})):
+                try:
+                    for i in range(7):
+                        db.execute("DELETE FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as))
+                        db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', (i, view_as, tinp[i]["basic"], tinp[i]["full"]))
+                    nb = {
+                        "weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}},
+                        "weekend": {"single": {"points": we_single, "full_points": we_single_full}},
+                        "longterm": {"week_basic": lt_wb, "week_full": lt_wf, "month_basic": lt_mb, "month_full": lt_mf, "week_flex_perfect_deduct": flex_p, "week_flex_basic_deduct": flex_b}
+                    }
+                    db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
+                    db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(nb)))
+                    db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
+                except RuntimeError: st.error(t("op_failed"))
+
+    # 6. 徽章 + 7. 用户管理（仅 admin）
+    if is_admin(view_role):
+        st.divider(); st.markdown("### 6. 全局徽章")
+        try: existing_badges = get_badge_configs()
+        except: existing_badges = []
+        for b in existing_badges:
+            c1, c2 = st.columns([5,1])
+            with c1: st.markdown(f'<img src="{html.escape(b["icon_url"] or "", quote=True)}" width="30"> **{html.escape(b["name"])}** — {b["cond_type"]} ≥ {b["cond_val"]}', unsafe_allow_html=True)
+            if c2.button("删除", key=f"del_badge_{b['id']}"):
+                try:
+                    db.execute("DELETE FROM config_badges WHERE id=?", (b["id"],)); db.commit(); st.cache_data.clear(); st.rerun()
+                except: st.error(t("op_failed"))
+        with st.form("add_badge_form"):
+            c1, c2, c3 = st.columns([3,2,2])
+            bn = c1.text_input("徽章名称")
+            bt = c2.selectbox("条件", options=["days","points","perfect","exam_hits"])
+            bv = c3.number_input("数值", min_value=1.0, step=1.0)
+            if _submit("✨ 生成并添加", **_stretch({"type": "primary"})):
+                if bn:
+                    try:
+                        seed = random.randint(1, 99999)
+                        prompt = f"Minimalist flat vector icon for '{bn}', clean simple design, ui app icon, no text, white background."
+                        icon = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=256&height=256&nologo=true&seed={seed}"
+                        db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (bn, bt, bv, icon))
+                        db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
+                    except RuntimeError: st.error(t("op_failed"))
+
+        st.divider(); st.markdown("### 7. 用户管理与权限控制")
+        user_kw = st.text_input(t("search_users"), key="admin_user_search")
+        filtered_users = all_users_data
+        if user_kw: filtered_users = [u for u in all_users_data if user_kw.lower() in u["username"].lower()]
+        st.caption(f"共 {len(filtered_users)} / {len(all_users_data)} 人")
+        for u in filtered_users:
+            uname = u["username"]; urole = u["role"]
+            try: host_row = db.execute("SELECT host_id FROM users WHERE username=?", (uname,)).fetchone(); uhost = dict(host_row).get("host_id") if host_row else None
+            except: uhost = None
+            is_self = (uname == current_user)
+            role_badge = {"admin":"🟢","host":"🟡","user":"⚪","solo":"🔵"}.get(urole, urole)
+            plan_exp = u.get("plan_expires_at") or ""
+            is_perm = str(plan_exp).startswith("2099")
+            plan_str = " [∞]" if is_perm else (f" [{str(plan_exp)[:10]}]" if plan_exp else " [exp]")
+            c1, c2, c3, c4 = st.columns([3,2,3,2])
+            c1.write(f"👤 **{html.escape(uname)}**{plan_str}" + (" (you)" if is_self else ""))
+            c2.write(role_badge)
+            c3.write(f"↳ {html.escape(uhost)}" if uhost else "—")
+            if not is_self:
+                with c4:
+                    with st.expander("操作"):
+                        if st.button("→ Admin", key=f"set_admin_{uname}", **_stretch({})):
+                            try: db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
+                            except: st.error(t("op_failed"))
+                        if st.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host"), **_stretch({})):
+                            try: db.execute("UPDATE users SET role='host' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
+                            except: st.error(t("op_failed"))
+                        if st.button("→ User", key=f"set_user_{uname}", disabled=(urole == "user"), **_stretch({})):
+                            try: db.execute("UPDATE users SET role='user' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
+                            except: st.error(t("op_failed"))
+                        if st.button("→ Solo", key=f"set_solo_{uname}", disabled=(urole == "solo"), **_stretch({})):
+                            try: db.execute("UPDATE users SET role='solo' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
+                            except: st.error(t("op_failed"))
+                        if st.button("⭐ 永久", key=f"set_perm_{uname}", disabled=is_perm, **_stretch({})):
+                            try: db.execute("UPDATE users SET plan_expires_at='2099-12-31 23:59:59' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
+                            except: st.error(t("op_failed"))
+                        if st.button("重置密码", key=f"reset_{uname}", **_stretch({})):
+                            try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname)); db.commit(); st.success("OK")
+                            except: st.error(t("op_failed"))
+                        if st.button("🗑 彻底删除", key=f"del_{uname}", **_stretch({"type":"primary"})):
+                            if urole == "admin" and _remaining_admins(db, uname) == 0: st.error("不能删除最后一个管理员")
+                            else:
+                                try:
+                                    delete_user_all_data(db, uname); db.commit(); st.cache_data.clear(); st.success("已删除"); st.rerun()
+                                except: st.error(t("op_failed"))
+            st.divider()
+        with st.expander("💳 生成兑换码"):
+            vd = st.number_input("有效天数", min_value=1, value=30)
+            if st.button("生成", type="primary"):
+                nc = uuid.uuid4().hex[:8].upper()
+                try:
+                    db.execute("INSERT INTO redeem_codes (code, days, is_used, created_at) VALUES (?,?,0,?)", (nc, int(vd), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                    db.commit(); st.success("OK"); st.code(nc, language="text")
+                except: st.error(t("op_failed"))
+        with st.expander("☁️ 云端数据库备份"):
+            if st.button("📥 生成完整备份 (JSON)", key="cloud_backup_gen"):
+                try:
+                    backup_data = {}
+                    for tbl in ALL_TABLES:
+                        try: backup_data[tbl] = [dict(r) for r in db.execute(f"SELECT * FROM {tbl}").fetchall()]
+                        except: continue
+                    st.session_state["cloud_backup_json"] = json.dumps(backup_data, ensure_ascii=False, indent=2, default=str)
+                    st.session_state["cloud_backup_filename"] = f"study_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    st.success("备份已生成")
+                except: st.error(t("op_failed"))
+            if st.session_state.get("cloud_backup_json"):
+                st.download_button("📥 下载完整备份 (JSON)", data=st.session_state.get("cloud_backup_json"),
+                    file_name=st.session_state.get("cloud_backup_filename","study_backup.json"), mime="application/json", key="cloud_dl")
+
+# ==================== 侧边栏 ====================
+def render_sidebar(db, current_user, current_role, user_row, user_tz):
+    with st.sidebar:
+        st.title(t("sidebar_title"))
+        render_language_selector("sidebar")
+        if st.session_state.get("lang") and user_row.get("language") != st.session_state["lang"]:
+            try:
+                db.execute("UPDATE users SET language=? WHERE username=?", (st.session_state["lang"], current_user))
+                db.commit()
+            except: pass
+        bal = {"balance":0,"daily":0,"period":0,"exam":0,"special":0,"spent":0,"extra":0}
+        view_as = current_user; view_role = current_role
+        if is_user(current_role): view_as = current_user; view_role = "user"
+        elif is_host(current_role):
+            try:
+                children = db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()
+                child_names = [r["username"] for r in children]
+            except: child_names = []
+            if not child_names: view_as = None; st.warning(t("no_children_bound"))
+            else:
+                if len(child_names) > 5:
+                    kw = st.text_input(t("search_children"), key="host_child_search")
+                    if kw:
+                        child_names = [c for c in child_names if kw.lower() in c.lower()]
+                if child_names: view_as = st.selectbox(t("select_child"), child_names, index=0); view_role = "user"
+        elif is_solo(current_role): view_as = current_user; view_role = "solo"
+        elif is_admin(current_role):
+            try: all_users = db.execute("SELECT username, role FROM users").fetchall()
+            except: all_users = []
+            user_list = [u["username"] for u in all_users]
+            if current_user in user_list: user_list.remove(current_user); user_list.insert(0, current_user)
+            kw = st.text_input(t("search_users"), key="admin_sidebar_search")
+            if kw: user_list = [x for x in user_list if kw.lower() in x.lower()]
+            if not user_list: st.warning(t("no_match"))
+            else:
+                selected_target = st.selectbox(t("admin_select_target"), user_list, index=0)
+                try:
+                    target_role_row = db.execute("SELECT role FROM users WHERE username=?", (selected_target,)).fetchone()
+                    target_role = target_role_row["role"] if target_role_row else "user"
+                except: target_role = "user"
+                if is_host(target_role):
+                    try:
+                        children = db.execute("SELECT username FROM users WHERE host_id=?", (selected_target,)).fetchall()
+                        child_names = [r["username"] for r in children]
+                    except: child_names = []
+                    if child_names:
+                        view_as = st.selectbox(f"{t('penetrate')}: {selected_target}", child_names, index=0); view_role = "user"
+                    else: view_as = selected_target; view_role = "host"
+                else: view_as = selected_target; view_role = target_role
+        if view_as:
+            try:
+                target_urow = db.execute("SELECT * FROM users WHERE username=?", (view_as,)).fetchone()
+                target_tz = target_urow.get("timezone_offset") if target_urow else 8.0
+                if target_tz is None: target_tz = 8.0
+                plan_exp = target_urow.get("plan_expires_at") if target_urow else None
+            except: target_tz = 8.0; plan_exp = None
+            view_today_local = get_user_today(target_tz)
+            view_makeup = get_makeup_cards_of(view_as)
+            role_display = {"admin":t("role_admin"),"host":t("role_host"),"user":t("role_user"),"solo":t("role_solo")}.get(view_role, view_role)
+            plan_exp_str = ""
+            if is_user(view_role) or is_solo(view_role) or is_admin(view_role):
+                rd = get_remaining_days(plan_exp)
+                if rd == 9999: plan_exp_str = f"\n\n⏳ {t('remaining')}: {t('permanent')}"
+                elif rd < 0: plan_exp_str = f"\n\n⚠️ {t('expired')}"
+                else: plan_exp_str = f"\n\n⏳ {t('remaining')}: {rd} d"
+            st.info(f"{t('current_identity')}: {html.escape(view_as)} ({role_display}){plan_exp_str}\n\n{t('local_time')}: {get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n{t('makeup_cards')}: {view_makeup}")
+            try: bal = get_balance(view_as)
+            except: pass
+            if not is_host(view_role): st.metric(t("available_points"), f"{bal['balance']:.1f}")
+        else:
+            st.info(f"{t('current_identity')}: {html.escape(current_user)} ({t('role_host')})")
+        if is_admin(view_role) or is_solo(view_role) or (is_host(view_role) and view_as):
+            with st.expander(t("timer"), expanded=False): render_timer()
+            with st.expander(t("badges")):
+                try: user_badges = get_user_badges(view_as)
+                except: user_badges = []
+                if user_badges:
+                    for i in range(0, len(user_badges), 3):
+                        cols = st.columns(3)
+                        for j in range(3):
+                            if i + j < len(user_badges):
+                                b = user_badges[i + j]
+                                with cols[j]:
+                                    st.markdown(f'<div style="height:60px;display:flex;align-items:center;justify-content:center;"><img src="{b["icon"]}" width="50" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'"></div>', unsafe_allow_html=True)
+                                    st.markdown(f"<div style='text-align:center;font-size:12px;'>{b['name']}</div>", unsafe_allow_html=True)
+                else: st.caption(t("no_badges"))
+            with st.expander(t("points_detail")):
+                st.write(f"{t('checkin_pts')}: {bal['daily']:.1f} | {t('longterm_pts')}: {bal['period']:.1f}")
+                st.write(f"{t('exam_pts')}: {bal['exam']:.1f} | {t('extra_pts')}: {bal['extra']:.1f}")
+                st.write(f"{t('special_pts')}: {bal['special']:.1f} | {t('spent_pts')}: -{bal['spent']:.1f}")
+        st.divider()
+        if st.button("🚪 " + t("logout_btn"), key="sidebar_logout", **_stretch({})):
+            for k in ["user","role"]: st.session_state.pop(k, None)
+            st.query_params.clear(); st.rerun()
+    return view_as, view_role, bal
+
+# ==================== CSS ====================
+def inject_css():
+    st.markdown("""
+<style>
+.stRadio > label { display: none !important; }
+.stRadio [role="radiogroup"] {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    gap: 4px !important;
+    padding: 6px !important;
+    border-bottom: 1px solid #e5e7eb !important;
+    background: #fff !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    scrollbar-width: thin !important;
+}
+.stRadio [role="radiogroup"] > label {
+    flex: 0 0 auto !important;
+    min-width: 72px !important;
+    text-align: center !important;
+    padding: 8px 12px !important;
+    border-radius: 8px !important;
+    cursor: pointer !important;
+    transition: all .2s !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    margin: 0 !important;
+}
+.stRadio [role="radiogroup"] > label > div:first-child { display: none !important; }
+.stRadio [role="radiogroup"] > label p {
+    font-size: 14px !important;
+    font-weight: 500 !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+    color: #374151 !important;
+}
+.stRadio [role="radiogroup"] > label:has(input:checked) { background: #eff6ff !important; }
+.stRadio [role="radiogroup"] > label:has(input:checked) p { color: #2563eb !important; font-weight: 700 !important; }
+
+@media (max-width: 768px) {
+    section[data-testid="stSidebar"] { display: none !important; }
+    .stTabs [data-baseweb="tab-list"] { display: none !important; }
+    .main .block-container {
+        padding-bottom: 95px !important;
+        padding-top: 1rem !important;
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+    }
+    .stRadio {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        z-index: 9999 !important;
+        background: #fff !important;
+        border-top: 1px solid #e5e7eb !important;
+        box-shadow: 0 -2px 10px rgba(0,0,0,0.06) !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    .stRadio [role="radiogroup"] {
+        border-bottom: none !important;
+        justify-content: space-around !important;
+        padding: 6px 4px !important;
+        gap: 0 !important;
+    }
+    .stRadio [role="radiogroup"] > label {
+        min-width: 0 !important;
+        flex: 1 !important;
+        padding: 6px 2px !important;
+        border-radius: 6px !important;
+    }
+    .stRadio [role="radiogroup"] > label p {
+        font-size: 11px !important;
+    }
+    h1 { font-size: 1.4rem !important; }
+    h2 { font-size: 1.15rem !important; }
+    h3 { font-size: 1rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ==================== main ====================
 def main():
-    st.set_page_config(page_title="学习打卡系统", layout="centered", initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="学习打卡系统", layout="wide", initial_sidebar_state="expanded")
+    inject_css()
     try: db = get_db()
     except RuntimeError: st.error(t("db_failed")); st.stop()
 
@@ -1421,12 +2313,13 @@ def main():
     try:
         user_row = db.execute("SELECT * FROM users WHERE username=?", (current_user,)).fetchone()
         if not user_row:
-            del st.session_state.user; del st.session_state.role; st.query_params.clear(); st.rerun()
+            for k in ["user","role"]: st.session_state.pop(k, None)
+            st.query_params.clear(); st.rerun()
     except RuntimeError: st.error(t("op_failed")); st.stop()
 
     if st.session_state.get("force_pwd_change"):
         st.title("⚠️ 安全提示：请修改默认密码")
-        st.warning("检测到您正在使用系统默认密码 (123456)，为了您的数据安全，请立即修改后才能继续使用。")
+        st.warning("检测到您正在使用系统默认密码 (123456)，请立即修改。")
         with st.form("force_pwd_form"):
             new_p = st.text_input(t("new_password"), type="password", max_chars=72)
             st.caption(t("pwd_req"))
@@ -1451,11 +2344,10 @@ def main():
     current_role = user_row["role"]; st.session_state.role = current_role
     try: all_users_data = get_all_users()
     except: all_users_data = []
-
     user_tz = user_row.get("timezone_offset") or 8.0
     now = get_user_now(user_tz); today = now.date()
 
-    # 【H3 修复】夜间提醒也做安全校验
+    # 夜间 webhook 提醒（H3 校验）
     try:
         if now.hour >= 21:
             tr = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (today.isoformat(), current_user)).fetchone()
@@ -1463,215 +2355,19 @@ def main():
                 url = user_row["webhook_url"]
                 safe, _ = _safe_webhook(url)
                 if safe:
-                    if "bark" in url: requests.get(f"{url}/今天还没打卡哦！", timeout=2)
-                    elif "serverchan" in url: requests.post(url, data={"title":"提醒","desp":"今天还没打卡哦！"}, timeout=2)
-                    else: requests.get(url, timeout=2)
+                    try:
+                        if "bark" in url: requests.get(f"{url}/今天还没打卡哦！", timeout=2)
+                        elif "serverchan" in url: requests.post(url, data={"title":"提醒","desp":"今天还没打卡哦！"}, timeout=2)
+                        else: requests.get(url, timeout=2)
+                    except: pass
                 else:
                     _log_db_error("webhook_unsafe_send", f"blocked {url}")
                 st.session_state[f"alerted_{today}"] = True
     except: pass
 
-    with st.sidebar:
-        st.title(t("sidebar_title"))
-        render_language_selector("sidebar")
-        if st.session_state.get("lang") and user_row.get("language") != st.session_state["lang"]:
-            try:
-                db.execute("UPDATE users SET language=? WHERE username=?", (st.session_state["lang"], current_user))
-                db.commit()
-            except: pass
-        is_mobile_mode = st.checkbox(t("mobile_mode"), value=False)
-        bal = {"balance":0,"daily":0,"period":0,"exam":0,"special":0,"spent":0,"extra":0}
-
-        view_as = current_user; view_role = current_role
-        if is_user(current_role): view_as = current_user; view_role = "user"
-        elif is_host(current_role):
-            try:
-                children = db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()
-                child_names = [r["username"] for r in children]
-            except: child_names = []
-            if not child_names: view_as = None; st.warning(t("no_children_bound"))
-            else:
-                if len(child_names) > 5:
-                    kw = st.text_input(t("search_children"), key="host_child_search")
-                    if kw:
-                        child_names = [c for c in child_names if kw.lower() in c.lower()]
-                        if not child_names: st.warning(t("no_match"))
-                if child_names:
-                    view_as = st.selectbox(t("select_child"), child_names, index=0); view_role = "user"
-        elif is_solo(current_role):
-            view_as = current_user; view_role = "solo"
-        elif is_admin(current_role):
-            try: all_users = db.execute("SELECT username, role FROM users").fetchall()
-            except: all_users = []
-            user_list = [u["username"] for u in all_users]
-            if current_user in user_list: user_list.remove(current_user); user_list.insert(0, current_user)
-            kw = st.text_input(t("search_users"), key="admin_sidebar_search")
-            if kw: user_list = [x for x in user_list if kw.lower() in x.lower()]
-            if not user_list: st.warning(t("no_match"))
-            else:
-                selected_target = st.selectbox(t("admin_select_target"), user_list, index=0)
-                try:
-                    target_role_row = db.execute("SELECT role FROM users WHERE username=?", (selected_target,)).fetchone()
-                    target_role = target_role_row["role"] if target_role_row else "user"
-                except: target_role = "user"
-                if is_host(target_role):
-                    try:
-                        children = db.execute("SELECT username FROM users WHERE host_id=?", (selected_target,)).fetchall()
-                        child_names = [r["username"] for r in children]
-                    except: child_names = []
-                    if child_names:
-                        selected_child = st.selectbox(f"{t('penetrate')}: {selected_target}", child_names, index=0)
-                        view_as = selected_child; view_role = "user"
-                    else:
-                        view_as = selected_target; view_role = "host"
-                else: view_as = selected_target; view_role = target_role
-
-        if view_as:
-            try:
-                target_urow = db.execute("SELECT * FROM users WHERE username=?", (view_as,)).fetchone()
-                target_tz = target_urow.get("timezone_offset") if target_urow else 8.0
-                if target_tz is None: target_tz = 8.0
-                plan_exp = target_urow.get("plan_expires_at") if target_urow else None
-            except: target_tz = 8.0; plan_exp = None
-            view_today = get_user_today(target_tz)
-            view_makeup_sidebar = get_makeup_cards_of(view_as)
-            role_display = {"admin":t("role_admin"),"host":t("role_host"),"user":t("role_user"),"solo":t("role_solo")}.get(view_role, view_role)
-            plan_exp_str = ""
-            if is_user(view_role) or is_solo(view_role) or is_admin(view_role):
-                rd = get_remaining_days(plan_exp)
-                if rd == 9999: plan_exp_str = f"\n\n⏳ {t('remaining')}: {t('permanent')}"
-                elif rd < 0: plan_exp_str = f"\n\n⚠️ {t('expired')}"
-                else: plan_exp_str = f"\n\n⏳ {t('remaining')}: {rd} d"
-            st.info(f"{t('current_identity')}: {html.escape(view_as)} ({role_display}){plan_exp_str}\n\n{t('local_time')}: {get_user_now(target_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n{t('makeup_cards')}: {view_makeup_sidebar}")
-            try: bal = get_balance(view_as)
-            except: pass
-            if not is_host(view_role): st.metric(t("available_points"), f"{bal['balance']:.1f}")
-        else:
-            st.info(f"{t('current_identity')}: {html.escape(current_user)} ({t('role_host')})\n\n{t('no_children_bound')}")
-
-        if not is_mobile_mode and (is_admin(view_role) or is_solo(view_role) or (is_host(view_role) and view_as)):
-            with st.expander(t("timer"), expanded=False): render_timer()
-            with st.expander(t("badges")):
-                try: user_badges = get_user_badges(view_as)
-                except: user_badges = []
-                if user_badges:
-                    for i in range(0, len(user_badges), 3):
-                        cols = st.columns(3)
-                        for j in range(3):
-                            if i + j < len(user_badges):
-                                b = user_badges[i + j]
-                                with cols[j]:
-                                    st.markdown(f'<div style="height:70px;display:flex;align-items:center;justify-content:center;"><img src="{b["icon"]}" width="60" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'"></div>', unsafe_allow_html=True)
-                                    st.markdown(f"<div style='text-align:center;font-size:14px;'>{b['name']}</div>", unsafe_allow_html=True)
-                else: st.caption(t("no_badges"))
-            with st.expander(t("points_detail")):
-                st.write(f"{t('checkin_pts')}: {bal['daily']:.1f} | {t('longterm_pts')}: {bal['period']:.1f}")
-                st.write(f"{t('exam_pts')}: {bal['exam']:.1f} | {t('extra_pts')}: {bal['extra']:.1f}")
-                st.write(f"{t('special_pts')}: {bal['special']:.1f} | {t('spent_pts')}: -{bal['spent']:.1f}")
-
-            st.divider()
-            with st.expander(t("account_settings")):
-                st.markdown(f"**{t('timezone')}**")
-                curr_tz_name = next((k for k, v in TIMEZONES.items() if v == user_tz), "自定义时区")
-                new_tz_name = st.selectbox(t("select_timezone"), list(TIMEZONES.keys()), index=list(TIMEZONES.keys()).index(curr_tz_name))
-                if new_tz_name == "自定义时区":
-                    custom_tz = st.number_input(t("tz_offset"), value=float(user_tz), step=0.5, min_value=-12.0, max_value=14.0)
-                    final_tz = custom_tz
-                else: final_tz = TIMEZONES[new_tz_name]
-                if st.button(t("save_tz"), **_stretch({})):
-                    try: db.execute("UPDATE users SET timezone_offset=? WHERE username=?", (final_tz, current_user)); db.commit(); st.success("OK"); st.rerun()
-                    except RuntimeError: st.error(t("op_failed"))
-
-                st.divider()
-                new_name = st.text_input(t("new_username"), placeholder=t("leave_blank"), max_chars=20)
-                if st.button(t("change_username"), **_stretch({})):
-                    if new_name and new_name != current_user:
-                        if new_name.lower() in ["system","admin"]: st.error(t("reserved_name"))
-                        else:
-                            try:
-                                if db.execute("SELECT * FROM users WHERE username=?", (new_name,)).fetchone(): st.error(t("user_exists"))
-                                else:
-                                    db.begin()
-                                    try:
-                                        for tbl in ["daily_records","period_bonus","redemptions","exam_rewards","special_events","extra_points","config_tasks","config_shop","config_exam","config_exam_rules","config_thresholds","config_bonus_rules","config_exam_multihit"]:
-                                            db.execute(f"UPDATE {tbl} SET owner_id=? WHERE owner_id=?", (new_name, current_user))
-                                        db.execute("UPDATE users SET host_id=? WHERE host_id=?", (new_name, current_user))
-                                        db.execute("UPDATE redeem_codes SET used_by=? WHERE used_by=?", (new_name, current_user))
-                                        db.execute("UPDATE users SET username=? WHERE username=?", (new_name, current_user))
-                                        db.commit(); db.end()
-                                        st.session_state.user = new_name
-                                        st.query_params["user"] = new_name
-                                        st.query_params["auth"] = generate_auth_token(new_name, user_row["password_hash"])
-                                        st.cache_data.clear(); st.success("OK"); st.rerun()
-                                    except Exception:
-                                        db.rollback(); db.end(); st.error(t("op_failed"))
-                            except RuntimeError: st.error(t("op_failed"))
-
-                st.divider()
-                new_pwd = st.text_input(t("new_password"), type="password", key="new_pwd", max_chars=72)
-                st.caption(t("pwd_req"))
-                if st.button(t("change_pwd"), **_stretch({})):
-                    if new_pwd:
-                        err = validate_password_strength(new_pwd)
-                        if err: st.error(err); st.stop()
-                        try:
-                            new_hash = hash_pwd_bcrypt(new_pwd)
-                            db.execute("UPDATE users SET password_hash=? WHERE username=?", (new_hash, current_user))
-                            db.commit()
-                            st.query_params["auth"] = generate_auth_token(current_user, new_hash)
-                            st.success("OK")
-                        except RuntimeError: st.error(t("op_failed"))
-
-                st.divider()
-                st.markdown(f"**{t('change_security')}**")
-                new_sq = st.text_input(t("new_security_q"), max_chars=50, key="new_sq")
-                new_sa = st.text_input(t("new_security_a"), max_chars=50, key="new_sa")
-                if st.button(t("save_security"), **_stretch({})):
-                    if not new_sq or not new_sa: st.error(t("fill_all"))
-                    else:
-                        try:
-                            db.execute("UPDATE users SET security_question=?, security_answer=? WHERE username=?", (new_sq, hash_security_answer(new_sa), current_user))
-                            db.commit(); st.success("OK")
-                        except RuntimeError: st.error(t("op_failed"))
-
-                st.divider()
-                st.markdown(f"**{t('webhook')}**")
-                webhook_input = st.text_input(t("webhook"), value=user_row.get("webhook_url") or "", placeholder="https://...")
-                if st.button(t("save_webhook"), **_stretch({})):
-                    # 【H3 修复】保存时校验
-                    if webhook_input:
-                        safe, reason = _safe_webhook(webhook_input)
-                        if not safe:
-                            st.error(f"{t('webhook_unsafe')}: {reason}")
-                        else:
-                            try:
-                                db.execute("UPDATE users SET webhook_url=? WHERE username=?", (webhook_input, current_user))
-                                db.commit(); st.success(t("webhook_saved"))
-                            except RuntimeError: st.error(t("op_failed"))
-                    else:
-                        try:
-                            db.execute("UPDATE users SET webhook_url=? WHERE username=?", ("", current_user))
-                            db.commit(); st.success("OK")
-                        except RuntimeError: st.error(t("op_failed"))
-
-                st.divider()
-                try:
-                    my_data = {
-                        "daily_records": [dict(r) for r in db.execute("SELECT * FROM daily_records WHERE owner_id=?", (current_user,)).fetchall()],
-                        "exam_rewards": [dict(r) for r in db.execute("SELECT * FROM exam_rewards WHERE owner_id=?", (current_user,)).fetchall()],
-                        "redemptions": [dict(r) for r in db.execute("SELECT * FROM redemptions WHERE owner_id=?", (current_user,)).fetchall()],
-                        "extra_points": [dict(r) for r in db.execute("SELECT * FROM extra_points WHERE owner_id=?", (current_user,)).fetchall()],
-                        "special_events": [dict(r) for r in db.execute("SELECT * FROM special_events WHERE owner_id=?", (current_user,)).fetchall()]
-                    }
-                    st.download_button(t("export_data"), data=json.dumps(my_data, ensure_ascii=False, indent=2, default=str), file_name=f"backup_{current_user}.json", mime="application/json", **_stretch({}))
-                except: pass
-
-        st.divider()
-        if st.button(t("logout_btn"), **_stretch({})):
-            del st.session_state.user; del st.session_state.role; st.query_params.clear(); st.rerun()
-
+    view_as, view_role, bal = render_sidebar(db, current_user, current_role, user_row, user_tz)
     if is_host(view_role) and view_as is None:
-        st.info(t("no_children_bound")); st.stop()
+        st.info(t("no_children_bound")); return
 
     if is_user(view_role) or is_solo(view_role):
         target_exp = user_row.get("plan_expires_at") if view_as == current_user else db.execute("SELECT plan_expires_at FROM users WHERE username=?", (view_as,)).fetchone()
@@ -1703,1049 +2399,41 @@ def main():
                             db.commit(); db.end(); st.success(t("redeem_success")); st.rerun()
                     except Exception:
                         db.rollback(); db.end(); st.error(t("redeem_fail"))
-            st.stop()
+            return
 
-    base_desktop = [t("tab_checkin"),t("tab_extra"),t("tab_history"),t("tab_shop"),t("tab_redeem"),t("tab_exam"),t("tab_event")]
-    base_mobile = [t("tab_checkin"),t("tab_shop"),t("tab_redeem")]
-    base_desktop_user = [t("tab_checkin"),t("tab_leaderboard"),t("tab_history"),t("tab_shop"),t("tab_redeem"),t("tab_exam"),t("tab_event")]
-    base_mobile_user = [t("tab_checkin"),t("tab_leaderboard"),t("tab_shop"),t("tab_redeem")]
-
+    # 决定 Tab 列表（统一，不再区分 mobile/desktop）
     if is_admin(current_role) or is_solo(current_role):
-        tabs = base_mobile + [t("tab_settings")] if is_mobile_mode else base_desktop + [t("tab_settings")]
+        tab_names = [t("tab_checkin"), t("tab_extra"), t("tab_history"), t("tab_shop"), t("tab_redeem"), t("tab_exam"), t("tab_event"), t("tab_settings")]
     elif is_host(current_role):
-        tabs = [t("tab_history"), t("tab_leaderboard"), t("tab_extra"), t("tab_settings")]
+        tab_names = [t("tab_history"), t("tab_leaderboard"), t("tab_extra"), t("tab_settings")]
     else:
-        tabs = base_mobile_user if is_mobile_mode else base_desktop_user
+        tab_names = [t("tab_checkin"), t("tab_leaderboard"), t("tab_history"), t("tab_shop"), t("tab_redeem"), t("tab_exam"), t("tab_event")]
 
-    tab_objs = st.tabs(tabs)
-    tab_dict = {name: obj for name, obj in zip(tabs, tab_objs)}
+    # 导航（st.radio 做底栏/顶栏）
+    nav_key = f"nav_selected_{current_role}"
+    if nav_key not in st.session_state or st.session_state[nav_key] not in tab_names:
+        st.session_state[nav_key] = tab_names[0]
+    selected_tab = st.radio(
+        "nav", tab_names,
+        index=tab_names.index(st.session_state[nav_key]),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="app_nav_widget"
+    )
+    st.session_state[nav_key] = selected_tab
 
-    # ============ 打卡 ============
-    if t("tab_checkin") in tab_dict:
-        with tab_dict[t("tab_checkin")]:
-            try: tasks = get_tasks(view_today.weekday(), view_as)
-            except: tasks = []
-            if not tasks: st.warning(t("no_tasks_today"))
-            else:
-                try: thresholds = get_thresholds(view_as); thr = thresholds.get(view_today.weekday(), {"basic":0,"full":0})
-                except: thr = {"basic":0,"full":0}
-                st.subheader(f"{view_today.strftime('%m-%d')} - {get_weekday(view_today.weekday())}")
-                st.caption(f"{t('basic_req')}: {thr['basic']} {t('lb_score')} | {t('full_req')}: {thr['full']} {t('lb_score')}")
-                try: existing = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
-                except: existing = None
-                already_done = existing is not None
-                done_ids = set(json.loads(existing["done_tasks"])) if (existing and existing["done_tasks"]) else set()
-                cats = {}
-                for task in tasks: cats.setdefault(task["category"], []).append(task)
-                selected_ids = []
-                for cat, items in cats.items():
-                    st.markdown(f"**{html.escape(cat)}**")
-                    if is_mobile_mode:
-                        for task in items:
-                            if st.checkbox(f"{html.escape(task['name'])} ({task['points']}{t('lb_score')})", value=(task["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{task['id']}", disabled=already_done):
-                                if not already_done: selected_ids.append(task["id"])
-                    else:
-                        cols = st.columns(2)
-                        for i, task in enumerate(items):
-                            with cols[i % 2]:
-                                if st.checkbox(f"{html.escape(task['name'])} ({task['points']}{t('lb_score')})", value=(task["id"] in done_ids), key=f"cb_{view_today}_{view_as}_{task['id']}", disabled=already_done):
-                                    if not already_done: selected_ids.append(task["id"])
-                st.divider()
-                c1, c2, c3 = st.columns(3)
-                if already_done:
-                    c1.metric(t("base_score"), f"{float(existing['base_score'] or 0):.1f}")
-                    c2.metric(t("bonus"), f"{float(existing['bonus_score'] or 0):.1f}")
-                    c3.metric(t("today_total"), f"{float(existing['total_score'] or 0):.1f}")
-                    st.success(t("today_done"))
-                    if st.button(t("undo_checkin"), **_stretch({"type": "secondary"})):
-                        try:
-                            db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)); db.commit()
-                            recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat())
-                            st.cache_data.clear(); st.rerun()
-                        except RuntimeError: st.error(t("op_failed"))
-                else:
-                    base_now = sum(task["points"] for task in tasks if task["id"] in set(selected_ids))
-                    try:
-                        lookup = {r["day"]: {"base_score": float(r["base_score"] or 0), "basic_thr": float(r.get("basic_thr") or 0), "full_thr": float(r.get("full_thr") or 0)} for r in db.execute("SELECT day, base_score, basic_thr, full_thr FROM daily_records WHERE owner_id=?", (view_as,)).fetchall()}
-                        lookup[view_today.isoformat()] = {"base_score": base_now, "basic_thr": thr["basic"], "full_thr": thr["full"]}
-                        bonus, detail = compute_bonus_for_day(view_today, lookup, get_bonus_rules(view_as))
-                    except: bonus, detail = 0.0, {}
-                    c1.metric(t("base_score"), f"{base_now:.1f}")
-                    c2.metric(t("bonus"), f"{bonus:.1f}")
-                    c3.metric(t("est_total"), f"{base_now + bonus:.1f}")
-                    if st.button(t("save_checkin"), **_stretch({"type": "primary"})):
-                        try: save_day(db, view_today, selected_ids, view_as, now.isoformat()); st.success(t("saved")); st.rerun()
-                        except RuntimeError: st.error(t("op_failed"))
+    view_today = get_user_today(user_row.get("timezone_offset") or 8.0)
 
-    # ============ 排行榜 ============
-    if t("tab_leaderboard") in tab_dict and (is_host(current_role) or is_user(current_role)):
-        with tab_dict[t("tab_leaderboard")]:
-            st.subheader(t("lb_title"))
-            if is_host(current_role):
-                try: lb_children = [r["username"] for r in db.execute("SELECT username FROM users WHERE host_id=?", (current_user,)).fetchall()]
-                except Exception: lb_children = []
-            else:
-                try:
-                    my_row = db.execute("SELECT host_id FROM users WHERE username=?", (current_user,)).fetchone()
-                    my_host = dict(my_row).get("host_id") if my_row else None
-                    if my_host:
-                        lb_children = [r["username"] for r in db.execute("SELECT username FROM users WHERE host_id=?", (my_host,)).fetchall()]
-                    else: lb_children = [current_user]
-                except Exception: lb_children = [current_user]
-            if not lb_children: st.info(t("lb_no_data"))
-            else:
-                if is_user(current_role) and len(lb_children) <= 1: st.info(t("lb_only_you"))
-                period = st.radio(t("lb_period"), options=["day","month","all"],
-                    format_func=lambda x: t({"day":"lb_day","month":"lb_month","all":"lb_total"}[x]),
-                    horizontal=True, key=f"lb_period_{current_role}")
-                board = get_leaderboard(lb_children, period, user_tz)
-                medals = ["🥇","🥈","🥉"]
-                max_score = max((b["score"] for b in board), default=0) or 1
-                for item in board:
-                    rank_icon = medals[item["rank"]-1] if item["rank"] <= 3 else f"#{item['rank']}"
-                    is_me = (is_user(current_role) and item["username"] == current_user)
-                    nm = html.escape(item["username"])
-                    if is_me: nm = f"**{nm}** :orange[**{t('lb_you')}**]"
-                    st.markdown(f"**{rank_icon}  {nm}**  —  {item['score']:.1f} {t('lb_score')}")
-                    st.progress(min(item["score"] / max_score, 1.0))
-
-    # ============ 偶发 ============
-    if t("tab_extra") in tab_dict:
-        with tab_dict[t("tab_extra")]:
-            if not can_edit_configs(current_role):
-                st.warning(t("extra_only_parent")); st.stop()
-            st.subheader(t("extra_title"))
-            with st.form("extra_point_form"):
-                col1, col2, col3 = st.columns([4,2,2])
-                e_name = col1.text_input(t("extra_name"))
-                e_pts = col2.number_input(t("extra_points"), value=1.0, step=0.5)
-                if _submit(t("extra_submit"), **_stretch({"type": "primary"})):
-                    if e_name:
-                        try:
-                            db.execute("INSERT INTO extra_points (owner_id, name, points, ts) VALUES (?,?,?,?)", (view_as, e_name, e_pts, now.isoformat()))
-                            db.commit(); st.cache_data.clear()
-                            st.success(t("extra_saved", name=html.escape(e_name), pts=e_pts)); st.rerun()
-                        except RuntimeError: st.error(t("op_failed"))
-            st.divider()
-            try: ex_rows = db.execute("SELECT * FROM extra_points WHERE owner_id=? ORDER BY id DESC LIMIT 20", (view_as,)).fetchall()
-            except: ex_rows = []
-            if ex_rows:
-                st.dataframe([{"Time": r["ts"], "Event": html.escape(r["name"]), "Pts": float(r["points"] or 0)} for r in ex_rows], use_container_width=True, hide_index=True)
-                if st.button(t("extra_clear"), **_stretch({})):
-                    try: db.execute("DELETE FROM extra_points WHERE owner_id=?", (view_as,)); db.commit(); st.cache_data.clear(); st.rerun()
-                    except RuntimeError: st.error(t("op_failed"))
-            else: st.caption(t("extra_none"))
-
-    # ============ 历史 ============
-    if t("tab_history") in tab_dict:
-        with tab_dict[t("tab_history")]:
-            st.subheader(t("history_title"))
-            view_makeup_hist = get_makeup_cards_of(view_as)
-            if is_host(current_role) and is_user(view_role): st.info(t("makeup_host_tip"))
-            elif is_host(view_role): st.info(t("makeup_host_self"))
-            else:
-                if view_makeup_hist > 0:
-                    st.markdown(t("makeup_intro", n=view_makeup_hist))
-                    try:
-                        missing_dates = [view_today - timedelta(days=i) for i in range(1, 8) if not db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", ((view_today - timedelta(days=i)).isoformat(), view_as)).fetchone()]
-                    except: missing_dates = []
-                    if missing_dates:
-                        sel_date = st.selectbox(t("makeup_pick_date"), missing_dates, format_func=lambda x: x.strftime('%Y-%m-%d') + f" ({get_weekday(x.weekday())})")
-                        past_tasks = get_tasks(sel_date.weekday(), view_as)
-                        st.write(t("makeup_pick_tasks", d=sel_date.strftime('%m-%d')))
-                        with st.form("makeup_form"):
-                            selected_past_ids = [task["id"] for task in past_tasks if st.checkbox(f"{html.escape(task['name'])} ({task['points']}{t('lb_score')})", key=f"makeup_cb_{sel_date}_{task['id']}")]
-                            if _submit(t("makeup_submit"), **_stretch({"type": "primary"})):
-                                db.begin()
-                                try:
-                                    cur = db.execute("UPDATE users SET makeup_cards = makeup_cards - 1 WHERE username=? AND makeup_cards > 0", (view_as,))
-                                    if getattr(cur, "rowcount", 0) == 0:
-                                        db.rollback(); db.end(); st.error(t("op_failed"))
-                                    else:
-                                        t_thr = get_thresholds(view_as).get(sel_date.weekday(), {"basic": 8, "full": 11})
-                                        db.execute("DELETE FROM daily_records WHERE day=? AND owner_id=?", (sel_date.isoformat(), view_as))
-                                        db.execute("INSERT INTO daily_records(day, owner_id, done_tasks, base_score, bonus_score, bonus_detail, total_score, updated_at, basic_thr, full_thr) VALUES (?, ?, ?, ?, 0, '{}', ?, ?, ?, ?)",
-                                            (sel_date.isoformat(), view_as, json.dumps(sorted(selected_past_ids)), t_thr["full"], t_thr["full"], now.isoformat(), t_thr["basic"], t_thr["full"]))
-                                        db.commit(); db.end()
-                                        recalc_all_bonus(db, view_as); settle_longterm_bonus(db, view_as, now.isoformat())
-                                        st.cache_data.clear(); st.success(t("makeup_ok")); st.rerun()
-                                except Exception:
-                                    db.rollback(); db.end(); st.error(t("makeup_fail"))
-                    else: st.info(t("makeup_no_miss"))
-                else: st.info(t("makeup_tip"))
-
-            if is_user(view_role) or is_solo(view_role) or (is_admin(current_role) and view_as == current_user):
-                st.divider()
-                st.markdown(t("weekly_report"))
-                start_date = view_today - timedelta(days=6)
-                try:
-                    week_records = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? AND day >= ? AND day <= ? ORDER BY day ASC", (view_as, start_date.isoformat(), view_today.isoformat())).fetchall()
-                except: week_records = []
-                full_week = []
-                for i in range(7):
-                    d_str = (start_date + timedelta(days=i)).isoformat()
-                    rec = next((r for r in week_records if r["day"] == d_str), None)
-                    full_week.append({"day": d_str, "total_score": float(rec["total_score"]) if rec else 0.0})
-                week_records = full_week
-                scores = [r["total_score"] for r in week_records]
-                days_count = len([s for s in scores if s > 0]); total_pts = sum(scores)
-                max_daily_score = max(scores) if scores else 0.0
-                rc1, rc2, rc3 = st.columns(3)
-                rc1.metric(t("week_checkin"), f"{days_count} d")
-                rc2.metric(t("week_total"), f"{total_pts:.1f}")
-                rc3.metric(t("day_max"), f"{max_daily_score:.1f}")
-                if st.button(t("gen_report"), **_stretch({"type": "primary"})):
-                    with st.spinner("..."):
-                        try:
-                            prop = setup_chinese_font()
-                            dates_labels = [r["day"][5:] for r in week_records]
-                            fig, ax = plt.subplots(figsize=(10, 6), facecolor='#f8f9fa'); ax.set_facecolor('#f8f9fa')
-                            bars = ax.bar(dates_labels, scores, color='#4CAF50', width=0.5, zorder=3)
-                            ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False); ax.spines['left'].set_visible(False)
-                            ax.grid(axis='y', linestyle='--', alpha=0.7, zorder=0)
-                            for bar in bars:
-                                yv = bar.get_height()
-                                if yv > 0: ax.text(bar.get_x() + bar.get_width()/2, yv + 0.1, f'{yv:.1f}', ha='center', va='bottom', fontsize=10, fontproperties=prop)
-                            title_text = f"🌟 {view_as} 🌟"
-                            summary_text = f"{t('week_checkin')}: {days_count} | {t('week_total')}: {total_pts:.1f} | {t('day_max')}: {max_daily_score:.1f}"
-                            if prop:
-                                ax.set_title(title_text, fontproperties=prop, fontsize=18, pad=20)
-                                fig.text(0.5, 0.88, summary_text, ha='center', fontsize=13, fontproperties=prop)
-                                plt.xticks(fontproperties=prop); plt.yticks(fontproperties=prop)
-                            else:
-                                ax.set_title(title_text, fontsize=18, pad=20)
-                                fig.text(0.5, 0.88, summary_text, ha='center', fontsize=13)
-                            plt.tight_layout(rect=[0,0,1,0.85])
-                            buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200, bbox_inches="tight"); buf.seek(0); plt.close(fig)
-                            st.image(buf, use_container_width=True)
-                            st.download_button(t("save_report"), data=buf, file_name=f"{view_as}_weekly_{start_date.isoformat()}.png", mime="image/png", **_stretch({"type":"secondary"}))
-                            st.success(t("report_ok"))
-                        except Exception: st.error(t("report_failed"))
-
-            st.divider()
-            time_view = st.radio(t("time_view"), [t("by_day"), t("by_week"), t("by_month")], horizontal=True)
-            try: all_recs = db.execute("SELECT day, total_score FROM daily_records WHERE owner_id=? ORDER BY day ASC", (view_as,)).fetchall()
-            except: all_recs = []
-            if all_recs:
-                df = pd.DataFrame([{"Date": r["day"], "Score": float(r["total_score"] or 0)} for r in all_recs])
-                df["Date"] = pd.to_datetime(df["Date"])
-                if time_view == t("by_day"): df_grouped = df.copy(); x_title = t("by_day")
-                elif time_view == t("by_week"): df_grouped = df.set_index("Date").resample('W-MON', label='left', closed='left').sum().reset_index(); x_title = t("by_week")
-                else: df_grouped = df.set_index("Date").resample('MS').sum().reset_index(); x_title = t("by_month")
-                st.altair_chart(alt.Chart(df_grouped).mark_line(point=True, color='#1f77b4').encode(x=alt.X('Date:T', title=x_title, axis=alt.Axis(labelAngle=0)), y=alt.Y('Score:Q', title=t("lb_score"), axis=alt.Axis(labelAngle=0)), tooltip=[alt.Tooltip('Date:T', format='%Y-%m-%d'), 'Score:Q']).interactive(), use_container_width=True)
-                st.altair_chart(alt.Chart(df_grouped).mark_bar().encode(x=alt.X('Date:T', title=x_title, axis=alt.Axis(labelAngle=0)), y=alt.Y('Score:Q', title=t("lb_score"), axis=alt.Axis(labelAngle=0)), color=alt.Color('Score:Q', scale=alt.Scale(scheme='greens'), legend=None), tooltip=[alt.Tooltip('Date:T', format='%Y-%m-%d'), 'Score:Q']), use_container_width=True)
-            else: st.info(t("no_data"))
-
-            st.divider(); st.subheader(t("checkin_hist_detail"))
-            try: days = [r["day"] for r in db.execute("SELECT day FROM daily_records WHERE owner_id=? ORDER BY day DESC", (view_as,)).fetchall()]
-            except: days = []
-            if days:
-                sel = st.selectbox(t("select_date"), days)
-                try:
-                    row = db.execute("SELECT * FROM daily_records WHERE day=? AND owner_id=?", (sel, view_as)).fetchone()
-                    st.write(f"**{t('today_total')}: {float(row['total_score'] or 0):.1f}** ({t('base_score')} {float(row['base_score'] or 0):.1f} + {t('bonus')} {float(row['bonus_score'] or 0):.1f})")
-                    done = json.loads(row["done_tasks"]) if row["done_tasks"] else []
-                    st.write(t("done_items"), ", ".join([html.escape(task["name"]) for task in get_tasks(date.fromisoformat(sel).weekday(), view_as) if task["id"] in done]) or t("none_yet"))
-                except: pass
-            else: st.info(t("no_record"))
-
-    # ============ 商城（H2 修复） ============
-    if t("tab_shop") in tab_dict:
-        with tab_dict[t("tab_shop")]:
-            st.subheader(t("tab_shop"))
-            try: shop_items = get_shop(view_as)
-            except: shop_items = []
-            if not shop_items: st.warning(t("shop_empty"))
-            else:
-                try: bal = get_balance(view_as)
-                except: bal = {"balance": 0}
-                for name, cost in shop_items:
-                    display_name = t("backup_card") if name == "补签卡" else name
-                    c1, c2, c3 = st.columns([5,2,2])
-                    c1.write(f"**{html.escape(display_name)}**"); c2.write(f"`{cost} {t('lb_score')}`")
-                    ck = f"confirm_buy_{view_as}_{name}"
-                    if st.session_state.get(ck):
-                        cc1, cc2 = st.columns(2)
-                        if cc1.button(t("confirm_deduct"), key=f"yes_{view_as}_{name}", **_stretch({"type":"primary"})):
-                            # 【H2 修复】事务 + 行锁，防双花
-                            db.begin()
-                            try:
-                                lock_user_row(db, view_as)  # ← 锁定用户行
-                                q = "SELECT (SELECT COALESCE(SUM(total_score),0) FROM daily_records WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM period_bonus WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM exam_rewards WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM special_events WHERE owner_id=?)+(SELECT COALESCE(SUM(points),0) FROM extra_points WHERE owner_id=?)-(SELECT COALESCE(SUM(cost),0) FROM redemptions WHERE owner_id=?) AS bal"
-                                row = db.execute(q, (view_as,view_as,view_as,view_as,view_as,view_as)).fetchone()
-                                if float(row["bal"] or 0) < cost:
-                                    db.rollback(); db.end()
-                                    st.error(t("points_insufficient"))
-                                else:
-                                    db.execute("INSERT INTO redemptions (owner_id, item, cost, ts) VALUES (?,?,?,?)", (view_as, name, cost, now.isoformat()))
-                                    if name == "补签卡": db.execute("UPDATE users SET makeup_cards = makeup_cards + 1 WHERE username=?", (view_as,))
-                                    db.commit(); db.end()
-                                    st.session_state[ck] = False; st.cache_data.clear(); st.success(t("redeem_ok")); st.rerun()
-                            except Exception as e:
-                                try: db.rollback(); db.end()
-                                except: pass
-                                _log_db_error("shop_redeem", str(e))
-                                st.error(t("redeem_conflict"))
-                        if cc2.button(t("cancel"), key=f"no_{view_as}_{name}", **_stretch({})):
-                            st.session_state[ck] = False; st.rerun()
-                    else:
-                        if c3.button(t("redeem_btn"), key=f"buy_{view_as}_{name}", disabled=(bal["balance"] < cost), **_stretch({})):
-                            st.session_state[ck] = True; st.rerun()
-
-    # ============ 兑换 ============
-    if t("tab_redeem") in tab_dict:
-        with tab_dict[t("tab_redeem")]:
-            st.subheader(t("redeem_history"))
-            try: rows = db.execute("SELECT * FROM redemptions WHERE owner_id=? ORDER BY id DESC", (view_as,)).fetchall()
-            except: rows = []
-            if rows:
-                st.dataframe([{"Time": r["ts"], "Reward": html.escape(r["item"]), "Cost": float(r["cost"] or 0)} for r in rows], use_container_width=True)
-            else: st.info(t("none_yet"))
-
-    # ============ 考试 ============
-    if t("tab_exam") in tab_dict:
-        with tab_dict[t("tab_exam")]:
-            st.subheader(t("exam_title"))
-            try: exam_config, _ = get_exam_config(view_as)
-            except: exam_config = {}
-            if not exam_config: st.warning(t("exam_no_subject"))
-            else:
-                today_str_for_exam = now.date().isoformat()
-                try:
-                    submitted_today = db.execute(
-                        "SELECT id, detail, points, ts FROM exam_rewards WHERE owner_id=? AND substr(ts, 1, 10)=? ORDER BY id DESC LIMIT 1",
-                        (view_as, today_str_for_exam)
-                    ).fetchone()
-                except Exception:
-                    submitted_today = None
-
-                if submitted_today:
-                    time_part = str(submitted_today["ts"] or "")[11:16] or "?"
-                    pts_part = float(submitted_today["points"] or 0)
-                    st.info(t("exam_already_submitted", time=time_part, pts=f"{pts_part:.1f}"))
-                    st.caption(t("exam_detail_prefix", detail=html.escape(str(submitted_today["detail"] or ""))))
-                    st.caption(t("exam_one_per_day"))
-                else:
-                    scores = {}; ranks = {}
-                    subj_list = list(exam_config.keys())
-                    for i in range(0, len(subj_list), 3):
-                        cols = st.columns(3)
-                        for j in range(3):
-                            if i + j < len(subj_list):
-                                sub = subj_list[i+j]; cfg = exam_config[sub]
-                                with cols[j]:
-                                    if cfg["type"] == "score":
-                                        max_s = float(cfg.get("max_score", 150))
-                                        scores[sub] = st.number_input(html.escape(sub) + " " + t("exam_score", max=max_s, target=cfg['target']), min_value=0.0, max_value=max_s, value=float(cfg.get('target', 0)), key=f"ex_{view_as}_{sub}")
-                                    else:
-                                        ti = GRADES.index(cfg['target']) if cfg['target'] in GRADES else 0
-                                        scores[sub] = st.selectbox(html.escape(sub) + " " + t("exam_grade", target=cfg['target']), GRADES, index=ti, key=f"ex_sel_{view_as}_{sub}")
-                    st.write(t("exam_ranks"))
-                    c1, c2, c3 = st.columns(3)
-                    ranks["语文"] = c1.number_input(t("exam_cn"), 0.0, 100.0, 100.0, key=f"rk_cn_{view_as}")
-                    ranks["数学"] = c2.number_input(t("exam_ma"), 0.0, 100.0, 100.0, key=f"rk_ma_{view_as}")
-                    ranks["英语"] = c3.number_input(t("exam_en"), 0.0, 100.0, 100.0, key=f"rk_en_{view_as}")
-                    total_pts, lines, hit_count = calc_exam_bonus(scores, ranks, view_as)
-                    st.divider()
-                    st.markdown(t("exam_estimate", pts=f"{total_pts:.1f}", hits=hit_count))
-                    for ln in lines: st.write(ln)
-                    if st.button(t("exam_save"), **_stretch({"type": "primary"})):
-                        try:
-                            again = db.execute(
-                                "SELECT id FROM exam_rewards WHERE owner_id=? AND substr(ts, 1, 10)=?",
-                                (view_as, today_str_for_exam)
-                            ).fetchone()
-                            if again:
-                                st.error(t("exam_duplicate_error"))
-                            else:
-                                detail_text = f"hit={hit_count} | " + "/".join([f"{k}:{v}" for k, v in scores.items()])
-                                db.execute("INSERT INTO exam_rewards (owner_id, detail, points, ts) VALUES (?,?,?,?)", (view_as, detail_text, total_pts, now.isoformat()))
-                                db.commit(); st.cache_data.clear(); st.success(t("exam_saved")); st.rerun()
-                        except RuntimeError: st.error(t("op_failed"))
-
-    # ============ 事件 ============
-    if t("tab_event") in tab_dict:
-        with tab_dict[t("tab_event")]:
-            st.subheader(t("event_title"))
-            try: fired = db.execute("SELECT * FROM special_events WHERE day=? AND owner_id=?", (view_today.isoformat(), view_as)).fetchone()
-            except: fired = None
-            if fired:
-                st.info(t("event_fired", note=html.escape(fired['note']), pts=float(fired['points'] or 0)))
-            else:
-                if st.session_state.get("confirm_roll"):
-                    st.warning(t("event_confirm"))
-                    rc1, rc2 = st.columns(2)
-                    if rc1.button(t("event_roll"), **_stretch({"type": "primary"})):
-                        try:
-                            roll = random.random()
-                            pts = random.randint(1,2) if roll < 0.4 else random.randint(3,5) if roll < 0.8 else random.randint(6,8) if roll < 0.95 else random.randint(10,15)
-                            db.execute("INSERT INTO special_events (day, owner_id, points, note, ts) VALUES (?,?,?,?,?)", (view_today.isoformat(), view_as, pts, t("event_note"), now.isoformat()))
-                            db.commit(); st.session_state["confirm_roll"] = False; st.cache_data.clear(); st.balloons(); st.success(t("event_got", pts=pts)); st.rerun()
-                        except RuntimeError: st.error(t("op_failed"))
-                    if rc2.button(t("cancel"), **_stretch({})): st.session_state["confirm_roll"] = False; st.rerun()
-                else:
-                    if st.button(t("event_roll_btn"), **_stretch({})): st.session_state["confirm_roll"] = True; st.rerun()
-
-    # ============ 系统设置 ============
-    if t("tab_settings") in tab_dict:
-        with tab_dict[t("tab_settings")]:
-            st.subheader(t("tab_settings"))
-            role_names = {"admin":t("role_admin"),"host":t("role_host"),"user":t("role_user"),"solo":t("role_solo")}
-            if view_as == current_user: st.info(f"{html.escape(view_as)}")
-            else: st.info(f"{html.escape(view_as)} ({role_names.get(view_role, view_role)})")
-
-            # ---- 1. 修改每日任务 ----
-            st.markdown("### 1. 修改每日任务")
-            sel_wd = st.selectbox("选择要修改的星期", range(7), format_func=lambda x: get_weekday(x))
-            try: tasks_list = db.execute("SELECT * FROM config_tasks WHERE weekday=? AND owner_id=? ORDER BY category ASC, name ASC", (sel_wd, view_as)).fetchall()
-            except: tasks_list = []
-            edit_mode_key = f"task_edit_mode_{view_as}_{sel_wd}"
-            if edit_mode_key not in st.session_state: st.session_state[edit_mode_key] = False
-            header_cols = st.columns([3,1])
-            header_cols[0].markdown(f"**{get_weekday(sel_wd)} ({len(tasks_list)})**")
-            if header_cols[1].button("完成编辑" if st.session_state[edit_mode_key] else "✏️ 编辑", key=f"toggle_edit_{view_as}_{sel_wd}"):
-                st.session_state[edit_mode_key] = not st.session_state[edit_mode_key]; st.rerun()
-            selected_task_ids = []
-            if tasks_list:
-                for task in tasks_list:
-                    if st.session_state[edit_mode_key]:
-                        c1, c2, c3, c4 = st.columns([1,2,4,2])
-                        if c1.checkbox("", key=f"chk_{view_as}_{sel_wd}_{task['id']}", label_visibility="collapsed"): selected_task_ids.append(task["id"])
-                        c2.write(f"`{html.escape(str(task.get('category') or ''))}`"); c3.write(f"**{html.escape(str(task['name']))}**"); c4.write(f"{float(task['points'] or 0)}")
-                    else:
-                        c1, c2, c3 = st.columns([2,4,2])
-                        c1.write(f"`{html.escape(str(task.get('category') or ''))}`"); c2.write(f"**{html.escape(str(task['name']))}**"); c3.write(f"{float(task['points'] or 0)}")
-                if st.session_state[edit_mode_key]:
-                    st.divider()
-                    if selected_task_ids:
-                        st.write(f"已选中 **{len(selected_task_ids)}** 项")
-                        ac1, ac2, ac3 = st.columns(3)
-                        if len(selected_task_ids) == 1:
-                            with ac1:
-                                if st.button("✏️ 编辑选中任务", **_stretch({})): st.session_state[f"editing_task_id_{view_as}_{sel_wd}"] = selected_task_ids[0]
-                        with ac2:
-                            if st.button("🗑 删除选中任务", **_stretch({"type": "primary"})):
-                                db.begin()
-                                try:
-                                    ph = ",".join(["?"] * len(selected_task_ids))
-                                    db.execute(f"DELETE FROM config_tasks WHERE id IN ({ph}) AND owner_id=?", (*selected_task_ids, view_as))
-                                    db.commit(); db.end(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                        with ac3:
-                            if st.button("🔄 同步到其他星期", **_stretch({})): st.session_state[f"syncing_tasks_{view_as}_{sel_wd}"] = selected_task_ids
-                        edit_task_id = st.session_state.get(f"editing_task_id_{view_as}_{sel_wd}")
-                        if edit_task_id:
-                            t_te = next((x for x in tasks_list if x["id"] == edit_task_id), None)
-                            if t_te:
-                                with st.form(f"edit_task_form_{view_as}_{sel_wd}_{edit_task_id}"):
-                                    ec1, ec2, ec3 = st.columns([2,3,2])
-                                    e_cat = ec1.text_input("分类", value=t_te["category"] or "", key=f"ec_{edit_task_id}")
-                                    e_name = ec2.text_input("任务名称", value=t_te["name"], key=f"en_{edit_task_id}")
-                                    e_pts = ec3.text_input("分数", value=str(t_te["points"]), key=f"ep_{edit_task_id}")
-                                    cs, cx = st.columns(2)
-                                    if cs.form_submit_button("保存修改", type="primary", use_container_width=True):
-                                        if not e_name.strip(): st.error("不能为空")
-                                        else:
-                                            try:
-                                                pv = float(e_pts.strip() or "0")
-                                                db.execute("UPDATE config_tasks SET category=?, name=?, points=? WHERE id=? AND owner_id=?", (e_cat.strip(), e_name.strip(), pv, edit_task_id, view_as))
-                                                db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_task_id_{view_as}_{sel_wd}", None); st.success("OK"); st.rerun()
-                                            except ValueError: st.error("数字")
-                                            except RuntimeError: st.error(t("op_failed"))
-                                    if cx.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_task_id_{view_as}_{sel_wd}", None); st.rerun()
-                        syncing_ids = st.session_state.get(f"syncing_tasks_{view_as}_{sel_wd}")
-                        if syncing_ids:
-                            with st.form(f"sync_tasks_form_{view_as}_{sel_wd}"):
-                                target_days = []
-                                scols = st.columns(7)
-                                for i in range(7):
-                                    if i != sel_wd:
-                                        if scols[i].checkbox(get_weekday(i), key=f"sync_day_{view_as}_{sel_wd}_{i}"): target_days.append(i)
-                                    else: scols[i].caption("当前")
-                                if st.form_submit_button("确认同步", type="primary", use_container_width=True):
-                                    if not target_days: st.warning("请选择")
-                                    else:
-                                        db.begin()
-                                        try:
-                                            for target_wd in target_days:
-                                                for tt in [x for x in tasks_list if x["id"] in syncing_ids]:
-                                                    nid = uuid.uuid4().hex
-                                                    db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?) ON CONFLICT (owner_id, weekday, category, name) DO NOTHING", (nid, target_wd, view_as, tt["category"], tt["name"], tt["points"]))
-                                            db.commit(); db.end(); st.cache_data.clear(); st.success("OK"); st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None); st.rerun()
-                                        except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                            if st.button("取消同步", key=f"cancel_sync_{view_as}_{sel_wd}"): st.session_state.pop(f"syncing_tasks_{view_as}_{sel_wd}", None); st.rerun()
-                    else: st.caption("请勾选")
-            with st.form(f"add_task_form_{view_as}_{sel_wd}", clear_on_submit=True):
-                st.markdown("**➕ 新增任务**")
-                tc1, tc2, tc3 = st.columns([2,3,2])
-                new_cat = tc1.text_input("分类", key=f"new_task_cat_{view_as}_{sel_wd}")
-                new_name = tc2.text_input("任务名称", key=f"new_task_name_{view_as}_{sel_wd}")
-                new_pts_str = tc3.text_input("分数", key=f"new_task_pts_{view_as}_{sel_wd}")
-                if _submit("➕ 添加任务", **_stretch({"type": "primary"})):
-                    if not new_name.strip(): st.error("不能为空")
-                    else:
-                        try: pv = float((new_pts_str or "0").strip() or "0")
-                        except ValueError: st.error("数字")
-                        else:
-                            try:
-                                db.execute("INSERT INTO config_tasks (id, weekday, owner_id, category, name, points) VALUES (?,?,?,?,?,?)", (uuid.uuid4().hex, sel_wd, view_as, new_cat.strip(), new_name.strip(), pv))
-                                db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                            except RuntimeError: st.error(t("op_failed"))
-
-            # ---- 2. 修改商城奖励 ----
-            st.divider(); st.markdown("### 2. 修改商城奖励")
-            try: shop_list = db.execute("SELECT * FROM config_shop WHERE owner_id=? ORDER BY id ASC", (view_as,)).fetchall()
-            except: shop_list = []
-            edit_shop_key = f"shop_edit_mode_{view_as}"
-            if edit_shop_key not in st.session_state: st.session_state[edit_shop_key] = False
-            header_cols = st.columns([3,1])
-            header_cols[0].markdown(f"**商城奖励 ({len(shop_list)})**")
-            if header_cols[1].button("完成编辑" if st.session_state[edit_shop_key] else "✏️ 编辑", key=f"toggle_edit_shop_{view_as}"):
-                st.session_state[edit_shop_key] = not st.session_state[edit_shop_key]; st.rerun()
-            selected_shop_ids = []
-            if shop_list:
-                for s in shop_list:
-                    if st.session_state[edit_shop_key]:
-                        c1, c2, c3 = st.columns([1,5,2])
-                        if c1.checkbox("", key=f"chk_shop_{view_as}_{s['id']}", label_visibility="collapsed"): selected_shop_ids.append(s["id"])
-                        c2.write(f"**{html.escape(str(s['name']))}**"); c3.write(f"{float(s['cost'] or 0)}")
-                    else:
-                        c1, c2 = st.columns([5,2])
-                        c1.write(f"**{html.escape(str(s['name']))}**"); c2.write(f"{float(s['cost'] or 0)}")
-                if st.session_state[edit_shop_key]:
-                    st.divider()
-                    if selected_shop_ids:
-                        ac1, ac2 = st.columns(2)
-                        if len(selected_shop_ids) == 1:
-                            with ac1:
-                                if st.button("✏️ 编辑选中奖励", key=f"edit_shop_btn_{view_as}"): st.session_state[f"editing_shop_id_{view_as}"] = selected_shop_ids[0]
-                        with ac2:
-                            if st.button("🗑 删除选中奖励", key=f"del_shop_btn_{view_as}", **_stretch({"type":"primary"})):
-                                db.begin()
-                                try:
-                                    ph = ",".join(["?"] * len(selected_shop_ids))
-                                    db.execute(f"DELETE FROM config_shop WHERE id IN ({ph}) AND owner_id=?", (*selected_shop_ids, view_as))
-                                    db.commit(); db.end(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                        edit_shop_id = st.session_state.get(f"editing_shop_id_{view_as}")
-                        if edit_shop_id:
-                            s_te = next((x for x in shop_list if x["id"] == edit_shop_id), None)
-                            if s_te:
-                                with st.form(f"edit_shop_form_{view_as}_{edit_shop_id}"):
-                                    ec1, ec2 = st.columns(2)
-                                    e_name = ec1.text_input("奖励名称", value=s_te["name"], key=f"es_name_{edit_shop_id}")
-                                    e_cost = ec2.text_input("所需积分", value=str(s_te["cost"]), key=f"es_cost_{edit_shop_id}")
-                                    cs, cx = st.columns(2)
-                                    if cs.form_submit_button("保存修改", type="primary", use_container_width=True):
-                                        if not e_name.strip(): st.error("不能为空")
-                                        else:
-                                            try:
-                                                cv = float(e_cost.strip() or "0")
-                                                db.execute("UPDATE config_shop SET name=?, cost=? WHERE id=? AND owner_id=?", (e_name.strip(), cv, edit_shop_id, view_as))
-                                                db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_shop_id_{view_as}", None); st.success("OK"); st.rerun()
-                                            except ValueError: st.error("数字")
-                                            except RuntimeError: st.error(t("op_failed"))
-                                    if cx.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_shop_id_{view_as}", None); st.rerun()
-            with st.form(f"add_shop_form_{view_as}", clear_on_submit=True):
-                st.markdown("**➕ 新增奖励**")
-                sc1, sc2 = st.columns([3,2])
-                new_shop_name = sc1.text_input("奖励名称", key=f"new_shop_name_{view_as}")
-                new_shop_cost_str = sc2.text_input("所需积分", key=f"new_shop_cost_{view_as}")
-                if _submit("➕ 添加奖励", **_stretch({"type": "primary"})):
-                    if not new_shop_name.strip(): st.error("不能为空")
-                    else:
-                        try: cv = float((new_shop_cost_str or "0").strip() or "0")
-                        except ValueError: st.error("数字")
-                        else:
-                            try:
-                                db.execute("INSERT INTO config_shop (owner_id, name, cost) VALUES (?,?,?)", (view_as, new_shop_name.strip(), cv))
-                                db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                            except RuntimeError: st.error(t("op_failed"))
-
-            # ---- 3. 修改考试科目 ----
-            st.divider(); st.markdown("### 3. 修改考试科目")
-            try: exam_config, _ = get_exam_config(view_as)
-            except: exam_config = {}
-
-            edit_exam_key = f"exam_edit_mode_{view_as}"
-            if edit_exam_key not in st.session_state: st.session_state[edit_exam_key] = False
-            header_cols = st.columns([3, 1])
-            header_cols[0].markdown(f"**考试科目（共 {len(exam_config)} 项）**")
-            if header_cols[1].button("完成编辑" if st.session_state[edit_exam_key] else "✏️ 编辑", key=f"toggle_edit_exam_{view_as}"):
-                st.session_state[edit_exam_key] = not st.session_state[edit_exam_key]; st.rerun()
-
-            selected_exam_subs = []
-            if exam_config:
-                for sub, cfg in exam_config.items():
-                    if st.session_state[edit_exam_key]:
-                        c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
-                        if c1.checkbox("", key=f"chk_exam_{view_as}_{sub}", label_visibility="collapsed"): selected_exam_subs.append(sub)
-                        c2.write(f"**{html.escape(sub)}**")
-                        if cfg.get("type") == "score": c3.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
-                        else: c3.write(f"等级制 | 目标 {cfg.get('target')}")
-                        c4.write(f"单档 {cfg.get('step_points', 0)} 分")
-                    else:
-                        c1, c2, c3 = st.columns([2, 5, 2])
-                        c1.write(f"**{html.escape(sub)}**")
-                        if cfg.get("type") == "score": c2.write(f"分数制 | 满分 {cfg.get('max_score', 150)} | 目标 {cfg.get('target')}")
-                        else: c2.write(f"等级制 | 目标 {cfg.get('target')}")
-                        c3.write(f"单档 {cfg.get('step_points', 0)} 分")
-                if st.session_state[edit_exam_key]:
-                    st.divider()
-                    if selected_exam_subs:
-                        st.write(f"已选中 **{len(selected_exam_subs)}** 项")
-                        ac1, ac2 = st.columns(2)
-                        if len(selected_exam_subs) == 1:
-                            with ac1:
-                                if st.button("✏️ 编辑选中科目", key=f"edit_exam_btn_{view_as}"): st.session_state[f"editing_exam_sub_{view_as}"] = selected_exam_subs[0]
-                        with ac2:
-                            if st.button("🗑 删除选中科目", key=f"del_exam_btn_{view_as}", **_stretch({"type": "primary"})):
-                                db.begin()
-                                try:
-                                    for sub in selected_exam_subs:
-                                        db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (sub, view_as))
-                                    db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                        edit_sub = st.session_state.get(f"editing_exam_sub_{view_as}")
-                        if edit_sub and edit_sub in exam_config:
-                            cfg = exam_config[edit_sub]
-                            st.info(f"正在编辑科目：{edit_sub}")
-                            with st.form(f"edit_exam_form_{view_as}_{edit_sub}"):
-                                ec1, ec2, ec3 = st.columns(3)
-                                e_sub = ec1.text_input("科目名称", value=edit_sub, key=f"e_sub_{edit_sub}")
-                                e_type = ec2.selectbox("类型", ["score", "grade"], index=0 if cfg.get("type")=="score" else 1, format_func=lambda x: "分数制" if x=="score" else "等级制")
-                                e_target = ec3.text_input("目标 (分数或等级)", value=str(cfg.get("target", "")), key=f"e_tgt_{edit_sub}")
-                                ec4, ec5, ec6 = st.columns(3)
-                                e_max = ec4.text_input("满分 (仅分数制)", value=str(cfg.get("max_score", "150")), key=f"e_max_{edit_sub}")
-                                e_step = ec5.text_input("分差 (仅分数制)", value=str(cfg.get("step", "0")), key=f"e_step_{edit_sub}")
-                                e_pts = ec6.text_input("单档奖励", value=str(cfg.get("step_points", "0")), key=f"e_pts_{edit_sub}")
-                                col_save, col_cancel = st.columns(2)
-                                if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
-                                    if not e_sub.strip() or not e_target.strip(): st.error("科目名称和目标不能为空")
-                                    else:
-                                        try:
-                                            pts_v = float(e_pts.strip() or "0")
-                                            if e_type == "score": cfg_new = {"type": "score", "max_score": float(e_max.strip() or "150"), "target": float(e_target.strip()), "step": float(e_step.strip() or "0"), "step_points": pts_v}
-                                            else: cfg_new = {"type": "grade", "target": e_target.strip(), "step_points": pts_v}
-                                            if e_sub.strip() != edit_sub:
-                                                if db.execute("SELECT 1 FROM config_exam WHERE subject=? AND owner_id=?", (e_sub.strip(), view_as)).fetchone(): st.error("新科目名称已存在"); st.stop()
-                                            db.execute("DELETE FROM config_exam WHERE subject=? AND owner_id=?", (edit_sub, view_as))
-                                            db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (e_sub.strip(), view_as, json.dumps(cfg_new)))
-                                            db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_exam_sub_{view_as}", None); st.success("科目已更新！"); st.rerun()
-                                        except ValueError: st.error("分数/目标必须为数字")
-                                        except RuntimeError: st.error(t("op_failed"))
-                                if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_exam_sub_{view_as}", None); st.rerun()
-                    else: st.caption("请勾选科目以进行编辑或删除操作。")
-            else: st.caption("暂无考试科目。")
-
-            with st.form(f"add_exam_form_{view_as}", clear_on_submit=True):
-                st.markdown("**➕ 新增科目（分数制）**")
-                ec1, ec2, ec3 = st.columns(3)
-                new_sub = ec1.text_input("科目名称", key=f"new_exam_sub_{view_as}")
-                new_max = ec2.text_input("满分", value="150", key=f"new_exam_max_{view_as}")
-                new_tgt = ec3.text_input("目标", value="105", key=f"new_exam_tgt_{view_as}")
-                ec4, ec5 = st.columns(2)
-                new_step = ec4.text_input("分差", value="3", key=f"new_exam_step_{view_as}")
-                new_sp = ec5.text_input("单档奖励", value="2", key=f"new_exam_sp_{view_as}")
-                if _submit("➕ 添加科目", **_stretch({"type": "primary"})):
-                    if not new_sub.strip(): st.error("不能为空")
-                    else:
-                        try:
-                            cfg = {"type":"score","max_score":float(new_max),"target":float(new_tgt),"step":float(new_step),"step_points":float(new_sp)}
-                            db.execute("INSERT INTO config_exam (subject, owner_id, config_json) VALUES (?,?,?)", (new_sub.strip(), view_as, json.dumps(cfg)))
-                            db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                        except (ValueError, RuntimeError): st.error(t("op_failed"))
-
-            # ---- 4. 修改多科达成奖励 ----
-            st.divider(); st.markdown("### 4. 修改多科达成奖励")
-            try: mh_list = get_exam_multihit(view_as)
-            except: mh_list = []
-
-            edit_mh_key = f"mh_edit_mode_{view_as}"
-            if edit_mh_key not in st.session_state: st.session_state[edit_mh_key] = False
-            header_cols = st.columns([3, 1])
-            header_cols[0].markdown(f"**多科奖励（共 {len(mh_list)} 项）**")
-            if header_cols[1].button("完成编辑" if st.session_state[edit_mh_key] else "✏️ 编辑", key=f"toggle_edit_mh_{view_as}"):
-                st.session_state[edit_mh_key] = not st.session_state[edit_mh_key]; st.rerun()
-
-            selected_mh_counts = []
-            if mh_list:
-                for mh in mh_list:
-                    if st.session_state[edit_mh_key]:
-                        c1, c2, c3 = st.columns([1, 4, 3])
-                        if c1.checkbox("", key=f"chk_mh_{view_as}_{mh['hit_count']}", label_visibility="collapsed"): selected_mh_counts.append(mh["hit_count"])
-                        c2.write(f"达成 **{mh['hit_count']}** 门及以上"); c3.write(f"+{mh['points']} 分")
-                    else:
-                        c1, c2 = st.columns([4, 3])
-                        c1.write(f"达成 **{mh['hit_count']}** 门及以上"); c2.write(f"+{mh['points']} 分")
-                if st.session_state[edit_mh_key]:
-                    st.divider()
-                    if selected_mh_counts:
-                        st.write(f"已选中 **{len(selected_mh_counts)}** 项")
-                        ac1, ac2 = st.columns(2)
-                        if len(selected_mh_counts) == 1:
-                            with ac1:
-                                if st.button("✏️ 编辑选中档位", key=f"edit_mh_btn_{view_as}"): st.session_state[f"editing_mh_count_{view_as}"] = selected_mh_counts[0]
-                        with ac2:
-                            if st.button("🗑 删除选中档位", key=f"del_mh_btn_{view_as}", **_stretch({"type": "primary"})):
-                                db.begin()
-                                try:
-                                    for hc in selected_mh_counts:
-                                        db.execute("DELETE FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (hc, view_as))
-                                    db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                        edit_mh_count = st.session_state.get(f"editing_mh_count_{view_as}")
-                        if edit_mh_count:
-                            mh_to_edit = next((x for x in mh_list if x["hit_count"] == edit_mh_count), None)
-                            if mh_to_edit:
-                                st.info(f"正在编辑：达成 {edit_mh_count} 门奖励")
-                                with st.form(f"edit_mh_form_{view_as}_{edit_mh_count}"):
-                                    ec1, ec2 = st.columns(2)
-                                    e_count = ec1.text_input("达成科目数", value=str(mh_to_edit["hit_count"]), key=f"emc_{edit_mh_count}")
-                                    e_pts = ec2.text_input("奖励分数", value=str(mh_to_edit["points"]), key=f"emp_{edit_mh_count}")
-                                    col_save, col_cancel = st.columns(2)
-                                    if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
-                                        try:
-                                            c_val = int(e_count.strip()); p_val = float(e_pts.strip())
-                                            if c_val < 1: st.error("科目数必须≥1")
-                                            elif c_val != edit_mh_count and db.execute("SELECT 1 FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (c_val, view_as)).fetchone(): st.error("该达成科目数已存在")
-                                            else:
-                                                db.execute("DELETE FROM config_exam_multihit WHERE hit_count=? AND owner_id=?", (edit_mh_count, view_as))
-                                                db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (c_val, view_as, p_val))
-                                                db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_mh_count_{view_as}", None); st.success("档位已更新！"); st.rerun()
-                                        except ValueError: st.error("科目数和奖励分数必须为数字")
-                                        except RuntimeError: st.error(t("op_failed"))
-                                    if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_mh_count_{view_as}", None); st.rerun()
-                    else: st.caption("请勾选档位以进行编辑或删除操作。")
-            else: st.caption("暂无多科达成奖励配置。")
-
-            with st.form(f"add_mh_form_{view_as}", clear_on_submit=True):
-                st.markdown("**➕ 新增多科奖励**")
-                mc1, mc2 = st.columns(2)
-                nmc = mc1.text_input("达成科目数", key=f"new_mh_count_{view_as}")
-                nmp = mc2.text_input("奖励分数", value="2", key=f"new_mh_pts_{view_as}")
-                if _submit("➕ 添加档位", **_stretch({"type": "primary"})):
-                    try:
-                        cv = int(nmc.strip()); pv = float(nmp.strip())
-                        db.execute("INSERT INTO config_exam_multihit (hit_count, owner_id, points) VALUES (?,?,?)", (cv, view_as, pv))
-                        db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                    except (ValueError, RuntimeError): st.error(t("op_failed"))
-
-            # ---- 5. 阈值与 Bonus 规则 ----
-            st.divider(); st.markdown("### 5. 阈值与 Bonus 规则（下次打卡时生效）")
-            try: thresholds = get_thresholds(view_as); bonus_rules = get_bonus_rules(view_as)
-            except: thresholds = {}; bonus_rules = DEFAULT_BONUS_RULES
-
-            edit_bonus_key = f"bonus_edit_mode_{view_as}"
-            if edit_bonus_key not in st.session_state: st.session_state[edit_bonus_key] = False
-            header_cols = st.columns([3, 1])
-            header_cols[0].markdown("**阈值与 Bonus 规则**")
-            if header_cols[1].button("完成编辑" if st.session_state[edit_bonus_key] else "✏️ 编辑", key=f"toggle_edit_bonus_{view_as}"):
-                st.session_state[edit_bonus_key] = not st.session_state[edit_bonus_key]; st.rerun()
-
-            if not st.session_state[edit_bonus_key]:
-                st.markdown("**每日阈值**")
-                t_cols = st.columns(7)
-                for i in range(7):
-                    with t_cols[i]:
-                        tt = thresholds.get(i, {"basic":0,"full":0})
-                        st.caption(f"**{get_weekday(i)}**")
-                        st.write(f"基本 {tt['basic']} | 满分 {tt['full']}")
-                st.markdown("**周中 Bonus**")
-                wd = bonus_rules["weekday"]
-                st.write(f"单日达标 {wd['single']['points']} / 满分 {wd['single']['full_points']}")
-                st.write(f"连2达标 {wd['streak2']['points']} / 满分 {wd['streak2']['full_points']}")
-                st.write(f"连4达标 {wd['streak4']['points']} / 满分 {wd['streak4']['full_points']}")
-                st.markdown("**周末 Bonus**")
-                we = bonus_rules["weekend"]["single"]
-                st.write(f"单日达标 {we['points']} / 满分 {we['full_points']}")
-                st.markdown("**长期奖励**")
-                lt = bonus_rules["longterm"]
-                st.write(f"整周达标 {lt['week_basic']} | 完美一周 {lt['week_full']}")
-                st.write(f"整月达标 {lt['month_basic']} | 完美一月 {lt['month_full']}")
-                st.write(f"弹性完美扣减 {lt.get('week_flex_perfect_deduct',1.0)} | 弹性达标扣减 {lt.get('week_flex_basic_deduct',0.5)}")
-            else:
-                with st.form(f"bonus_form_{view_as}"):
-                    t_cols = st.columns(7); tinp = {}
-                    for i in range(7):
-                        with t_cols[i]:
-                            st.markdown(f"**{get_weekday(i)}**")
-                            tinp[i] = {"basic": st.number_input("基本", value=float(thresholds.get(i,{"basic":0})["basic"]), key=f"th_b_{view_as}_{i}"), "full": st.number_input("满分", value=float(thresholds.get(i,{"full":0})["full"]), key=f"th_f_{view_as}_{i}")}
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        wd_single = st.number_input("单日达标", value=float(bonus_rules["weekday"]["single"]["points"]), step=0.5, key=f"b1_{view_as}")
-                        wd_single_full = st.number_input("单日满分", value=float(bonus_rules["weekday"]["single"]["full_points"]), step=0.5, key=f"b2_{view_as}")
-                        wd_2 = st.number_input("连2达标", value=float(bonus_rules["weekday"]["streak2"]["points"]), step=0.5, key=f"b3_{view_as}")
-                        wd_2_full = st.number_input("连2满分", value=float(bonus_rules["weekday"]["streak2"]["full_points"]), step=0.5, key=f"b4_{view_as}")
-                        wd_4 = st.number_input("连4达标", value=float(bonus_rules["weekday"]["streak4"]["points"]), step=0.5, key=f"b5_{view_as}")
-                        wd_4_full = st.number_input("连4满分", value=float(bonus_rules["weekday"]["streak4"]["full_points"]), step=0.5, key=f"b6_{view_as}")
-                    with c2:
-                        we_single = st.number_input("周末单日达标", value=float(bonus_rules["weekend"]["single"]["points"]), step=0.5, key=f"b7_{view_as}")
-                        we_single_full = st.number_input("周末单日满分", value=float(bonus_rules["weekend"]["single"]["full_points"]), step=0.5, key=f"b8_{view_as}")
-                        lt_wb = st.number_input("整周达标", value=float(bonus_rules["longterm"]["week_basic"]), step=0.5, key=f"b9_{view_as}")
-                        lt_wf = st.number_input("完美一周", value=float(bonus_rules["longterm"]["week_full"]), step=0.5, key=f"b10_{view_as}")
-                        lt_mb = st.number_input("整月达标", value=float(bonus_rules["longterm"]["month_basic"]), step=0.5, key=f"b11_{view_as}")
-                        lt_mf = st.number_input("完美一月", value=float(bonus_rules["longterm"]["month_full"]), step=0.5, key=f"b12_{view_as}")
-                        flex_p = st.number_input("弹性完美扣减", value=float(bonus_rules["longterm"].get("week_flex_perfect_deduct",1.0)), step=0.5, key=f"b13_{view_as}")
-                        flex_b = st.number_input("弹性达标扣减", value=float(bonus_rules["longterm"].get("week_flex_basic_deduct",0.5)), step=0.5, key=f"b14_{view_as}")
-                    if _submit("保存新规则", **_stretch({"type": "primary"})):
-                        try:
-                            for i in range(7):
-                                db.execute("DELETE FROM config_thresholds WHERE weekday=? AND owner_id=?", (i, view_as))
-                                db.execute('INSERT INTO config_thresholds (weekday, owner_id, basic, "full") VALUES (?,?,?,?)', (i, view_as, tinp[i]["basic"], tinp[i]["full"]))
-                            nb = {
-                                "weekday": {"single": {"points": wd_single, "full_points": wd_single_full}, "streak2": {"points": wd_2, "full_points": wd_2_full}, "streak4": {"points": wd_4, "full_points": wd_4_full}},
-                                "weekend": {"single": {"points": we_single, "full_points": we_single_full}},
-                                "longterm": {"week_basic": lt_wb, "week_full": lt_wf, "month_basic": lt_mb, "month_full": lt_mf, "week_flex_perfect_deduct": flex_p, "week_flex_basic_deduct": flex_b}
-                            }
-                            db.execute("DELETE FROM config_bonus_rules WHERE owner_id=?", (view_as,))
-                            db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(nb)))
-                            db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                        except RuntimeError: st.error(t("op_failed"))
-
-            # ---- 6. 全局徽章 ----
-            st.divider(); st.markdown("### 6. 全局徽章")
-            if is_admin(view_role):
-                require_admin(view_role)
-                try: existing_badges = get_badge_configs()
-                except: existing_badges = []
-
-                edit_badge_key = f"badge_edit_mode_{view_as}"
-                if edit_badge_key not in st.session_state: st.session_state[edit_badge_key] = False
-                header_cols = st.columns([3, 1])
-                header_cols[0].markdown(f"**已配置徽章（共 {len(existing_badges)} 项）**")
-                if header_cols[1].button("完成编辑" if st.session_state[edit_badge_key] else "✏️ 编辑", key=f"toggle_edit_badge_{view_as}"):
-                    st.session_state[edit_badge_key] = not st.session_state[edit_badge_key]; st.rerun()
-
-                selected_badge_ids = []
-                if existing_badges:
-                    for b in existing_badges:
-                        if st.session_state[edit_badge_key]:
-                            c1, c2, c3, c4 = st.columns([1, 2, 5, 2])
-                            if c1.checkbox("", key=f"chk_badge_{b['id']}", label_visibility="collapsed"): selected_badge_ids.append(b["id"])
-                            with c2: st.markdown(f'<img src="{html.escape(b["icon_url"] or "", quote=True)}" width="40" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'">', unsafe_allow_html=True)
-                            c3.write(f"**{html.escape(b['name'])}**")
-                            type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
-                            c4.write(f"条件：{type_cn} ≥ {b['cond_val']}")
-                        else:
-                            c1, c2, c3 = st.columns([2, 5, 2])
-                            with c1: st.markdown(f'<img src="{html.escape(b["icon_url"] or "", quote=True)}" width="50" loading="lazy" onerror="this.src=\'{DEFAULT_ICON_BASE64}\'">', unsafe_allow_html=True)
-                            c2.write(f"**{html.escape(b['name'])}**")
-                            type_cn = {"days": "打卡天数", "points": "累计积分", "perfect": "完美次数", "exam_hits": "单次考试达科目数"}.get(b["cond_type"], b["cond_type"])
-                            c3.write(f"条件：{type_cn} ≥ {b['cond_val']}")
-                    if st.session_state[edit_badge_key]:
-                        st.divider()
-                        if selected_badge_ids:
-                            st.write(f"已选中 **{len(selected_badge_ids)}** 项")
-                            ac1, ac2 = st.columns(2)
-                            if len(selected_badge_ids) == 1:
-                                with ac1:
-                                    if st.button("✏️ 编辑选中徽章", key=f"edit_badge_btn_{view_as}"): st.session_state[f"editing_badge_id_{view_as}"] = selected_badge_ids[0]
-                            with ac2:
-                                if st.button("🗑 删除选中徽章", key=f"del_badge_btn_{view_as}", **_stretch({"type": "primary"})):
-                                    db.begin()
-                                    try:
-                                        for bid in selected_badge_ids:
-                                            db.execute("DELETE FROM config_badges WHERE id=? AND owner_id='system'", (bid,))
-                                        db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                    except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                            edit_bid = st.session_state.get(f"editing_badge_id_{view_as}")
-                            if edit_bid:
-                                b_to_edit = next((x for x in existing_badges if x["id"] == edit_bid), None)
-                                if b_to_edit:
-                                    st.info(f"正在编辑徽章：{b_to_edit['name']}")
-                                    with st.form(f"edit_badge_form_{view_as}_{edit_bid}"):
-                                        ec1, ec2, ec3 = st.columns([3, 2, 2])
-                                        e_bn = ec1.text_input("徽章名称", value=b_to_edit["name"], key=f"ebn_{edit_bid}")
-                                        bt_opts = ["days","points","perfect","exam_hits"]
-                                        e_bt = ec2.selectbox("条件类型", bt_opts, index=bt_opts.index(b_to_edit["cond_type"]) if b_to_edit["cond_type"] in bt_opts else 0, format_func=lambda x: {"days":"打卡天数","points":"累计积分","perfect":"完美次数","exam_hits":"单次考试达科目数"}.get(x,x), key=f"ebt_{edit_bid}")
-                                        e_bv = ec3.number_input("达成数值", min_value=1.0, step=1.0, value=float(b_to_edit["cond_val"] or 1), key=f"ebv_{edit_bid}")
-                                        col_save, col_cancel = st.columns(2)
-                                        if col_save.form_submit_button("保存修改", type="primary", use_container_width=True):
-                                            if not e_bn.strip(): st.error("名称不能为空")
-                                            else:
-                                                try:
-                                                    db.execute("UPDATE config_badges SET name=?, cond_type=?, cond_val=? WHERE id=? AND owner_id='system'", (e_bn.strip(), e_bt, e_bv, edit_bid))
-                                                    db.commit(); st.cache_data.clear(); st.session_state.pop(f"editing_badge_id_{view_as}", None); st.success("徽章已更新！"); st.rerun()
-                                                except RuntimeError: st.error(t("op_failed"))
-                                        if col_cancel.form_submit_button("取消编辑", use_container_width=True): st.session_state.pop(f"editing_badge_id_{view_as}", None); st.rerun()
-                        else: st.caption("请勾选徽章以进行编辑或删除操作。")
-                else: st.caption("暂无全局徽章。")
-
-                with st.form("add_badge_form"):
-                    st.markdown("**➕ 新增徽章**")
-                    c1, c2, c3 = st.columns([3,2,2])
-                    bn = c1.text_input("徽章名称")
-                    bt = c2.selectbox("条件", options=["days","points","perfect","exam_hits"], format_func=lambda x: {"days":"打卡天数","points":"累计积分","perfect":"完美次数","exam_hits":"单次达成科目数"}.get(x,x))
-                    bv = c3.number_input("数值", min_value=1.0, step=1.0)
-                    if _submit("✨ 生成并添加", **_stretch({"type": "primary"})):
-                        if bn:
-                            try:
-                                seed = random.randint(1, 99999)
-                                prompt = f"Minimalist flat vector icon for '{bn}', clean simple design, ui app icon, no text, white background."
-                                icon = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt)}?width=256&height=256&nologo=true&seed={seed}"
-                                db.execute("INSERT INTO config_badges (owner_id, name, cond_type, cond_val, icon_url) VALUES ('system', ?, ?, ?, ?)", (bn, bt, bv, icon))
-                                db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                            except RuntimeError: st.error(t("op_failed"))
-            else: st.info("管理员配置")
-
-            # ---- 7. 用户管理 ----
-            if is_admin(view_role):
-                require_admin(view_role)
-                st.divider(); st.markdown("### 7. 用户管理与权限控制")
-                user_kw = st.text_input(t("search_users"), key="admin_user_search")
-                filtered_users = all_users_data
-                if user_kw:
-                    filtered_users = [u for u in all_users_data if user_kw.lower() in u["username"].lower()]
-                st.caption(f"共 {len(filtered_users)} / {len(all_users_data)} 人")
-
-                edit_user_key = f"user_edit_mode_{view_as}"
-                if edit_user_key not in st.session_state: st.session_state[edit_user_key] = False
-                if st.button("完成编辑" if st.session_state[edit_user_key] else "✏️ 编辑", key=f"toggle_edit_user_{view_as}"):
-                    st.session_state[edit_user_key] = not st.session_state[edit_user_key]; st.rerun()
-
-                if not filtered_users:
-                    st.warning(t("no_match"))
-
-                selected_usernames = []
-                for u in filtered_users:
-                    uname = u["username"]; urole = u["role"]
-                    try: host_row = db.execute("SELECT host_id FROM users WHERE username=?", (uname,)).fetchone(); uhost = dict(host_row).get("host_id") if host_row else None
-                    except: uhost = None
-                    is_self = (uname == current_user)
-                    role_badge = {"admin":"🟢","host":"🟡","user":"⚪","solo":"🔵"}.get(urole, urole)
-                    plan_exp = u.get("plan_expires_at") or ""
-                    is_perm = str(plan_exp).startswith("2099")
-                    plan_str = " [∞]" if is_perm else (f" [{str(plan_exp)[:10]}]" if plan_exp else " [exp]")
-
-                    if st.session_state[edit_user_key]:
-                        if is_self:
-                            c1, c2, c3, c4 = st.columns([1, 3, 2, 3])
-                            c1.write(""); c2.write(f"👤 **{html.escape(uname)}** (你自己){plan_str}"); c3.write(role_badge); c4.write(f"↳ {html.escape(uhost)}" if uhost else "—")
-                        else:
-                            c1, c2, c3, c4 = st.columns([1, 3, 2, 3])
-                            if c1.checkbox("", key=f"chk_user_{uname}", label_visibility="collapsed"): selected_usernames.append(uname)
-                            c2.write(f"👤 **{html.escape(uname)}**{plan_str}"); c3.write(role_badge); c4.write(f"↳ {html.escape(uhost)}" if uhost else "—")
-                    else:
-                        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
-                        c1.write(f"👤 **{html.escape(uname)}**{plan_str}" + (" (you)" if is_self else ""))
-                        c2.write(role_badge)
-                        c3.write(f"↳ {html.escape(uhost)}" if uhost else "—")
-                        if not is_self:
-                            with c4:
-                                with st.expander("操作"):
-                                    if st.button("→ Admin", key=f"set_admin_{uname}", **_stretch({})):
-                                        try: db.execute("UPDATE users SET role='admin' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError: st.error(t("op_failed"))
-                                    if st.button("→ Host", key=f"set_host_{uname}", disabled=(urole == "host"), **_stretch({})):
-                                        try: db.execute("UPDATE users SET role='host' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError: st.error(t("op_failed"))
-                                    if st.button("→ User", key=f"set_user_{uname}", disabled=(urole == "user"), **_stretch({})):
-                                        try: db.execute("UPDATE users SET role='user' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError: st.error(t("op_failed"))
-                                    if st.button("→ Solo", key=f"set_solo_{uname}", disabled=(urole == "solo"), **_stretch({})):
-                                        try: db.execute("UPDATE users SET role='solo' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError: st.error(t("op_failed"))
-                                    if st.button("⭐ 永久", key=f"set_perm_{uname}", disabled=is_perm, **_stretch({})):
-                                        try: db.execute("UPDATE users SET plan_expires_at='2099-12-31 23:59:59' WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError: st.error(t("op_failed"))
-                                    if st.button("重置密码", key=f"reset_{uname}", **_stretch({})):
-                                        try: db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname)); db.commit(); st.success("OK")
-                                        except RuntimeError: st.error(t("op_failed"))
-                                    bv = st.text_input("绑定 host", value=uhost or "", key=f"bind_val_{uname}", label_visibility="collapsed")
-                                    if st.button("保存绑定", key=f"save_bind_{uname}", **_stretch({})):
-                                        tgt = (bv or "").strip()
-                                        if not tgt: st.error("空")
-                                        elif tgt == uname: st.error("不能绑定自己")
-                                        else:
-                                            try:
-                                                t_row = db.execute("SELECT role FROM users WHERE username=?", (tgt,)).fetchone()
-                                                if not t_row or t_row["role"] not in ("host","admin"): st.error("目标无效")
-                                                else:
-                                                    db.execute("UPDATE users SET host_id=? WHERE username=?", (tgt, uname)); db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
-                                            except RuntimeError: st.error(t("op_failed"))
-                                    if st.button("解绑", key=f"unbind_{uname}", disabled=(not uhost), **_stretch({})):
-                                        try: db.execute("UPDATE users SET host_id=NULL WHERE username=?", (uname,)); db.commit(); st.cache_data.clear(); st.rerun()
-                                        except RuntimeError: st.error(t("op_failed"))
-                    st.divider()
-
-                if st.session_state[edit_user_key]:
-                    if selected_usernames:
-                        st.write(f"已选中 **{len(selected_usernames)}** 名用户")
-                        bc1, bc2, bc3 = st.columns(3)
-                        with bc1:
-                            if st.button("🔑 批量重置密码", key="batch_reset_pwd", **_stretch({})):
-                                try:
-                                    for uname in selected_usernames:
-                                        db.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd_bcrypt("123456"), uname))
-                                    db.commit(); st.success("批量重置成功！"); st.rerun()
-                                except Exception: st.error(t("op_failed"))
-                        with bc2:
-                            if st.button("⭐ 批量设为永久", key="batch_set_perm", **_stretch({})):
-                                try:
-                                    for uname in selected_usernames:
-                                        db.execute("UPDATE users SET plan_expires_at='2099-12-31 23:59:59' WHERE username=?", (uname,))
-                                    db.commit(); st.success("批量设为永久成功！"); st.rerun()
-                                except Exception: st.error(t("op_failed"))
-                        with bc3:
-                            if st.button("🗑 批量彻底删除", key="batch_del_users", **_stretch({"type": "primary"})):
-                                blocked = []
-                                for uname in selected_usernames:
-                                    urole_row = db.execute("SELECT role FROM users WHERE username=?", (uname,)).fetchone()
-                                    if urole_row and urole_row["role"] == "admin":
-                                        if _remaining_admins(db, uname) == 0: blocked.append(uname)
-                                if blocked:
-                                    st.error(f"以下用户是最后一个管理员，无法删除：{', '.join(blocked)}")
-                                else:
-                                    db.begin()
-                                    try:
-                                        for uname in selected_usernames:
-                                            delete_user_all_data(db, uname)
-                                        db.commit(); db.end(); st.cache_data.clear(); st.success("批量删除成功！"); st.rerun()
-                                    except Exception: db.rollback(); db.end(); st.error(t("op_failed"))
-                    else:
-                        st.caption("请勾选用户以进行批量操作。")
-
-                with st.expander("💳 生成兑换码"):
-                    vd = st.number_input("有效天数", min_value=1, value=30)
-                    if st.button("生成", type="primary"):
-                        nc = uuid.uuid4().hex[:8].upper()
-                        try:
-                            db.execute("INSERT INTO redeem_codes (code, days, is_used, created_at) VALUES (?,?,0,?)", (nc, int(vd), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-                            db.commit(); st.success("OK"); st.code(nc, language="text")
-                        except RuntimeError: st.error(t("op_failed"))
-
-                with st.expander("☁️ 云端数据库备份（管理员）"):
-                    st.caption("Streamlit 没有后台定时任务能力，应用内提供一键 JSON 全库导出，作为云端 PostgreSQL 的最大补偿。")
-                    if st.button("📥 生成完整备份 (JSON)", key="cloud_backup_generate"):
-                        try:
-                            backup_data = {}
-                            for tbl in ALL_TABLES:
-                                try:
-                                    rows = db.execute(f"SELECT * FROM {tbl}").fetchall()
-                                    backup_data[tbl] = [dict(r) for r in rows]
-                                except Exception:
-                                    continue
-                            st.session_state["cloud_backup_json"] = json.dumps(backup_data, ensure_ascii=False, indent=2, default=str)
-                            st.session_state["cloud_backup_filename"] = f"study_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                            st.success("备份已生成，请点击下方按钮下载。")
-                        except Exception:
-                            st.error(t("op_failed"))
-                    if st.session_state.get("cloud_backup_json"):
-                        st.download_button(
-                            "📥 下载完整备份 (JSON)",
-                            data=st.session_state.get("cloud_backup_json"),
-                            file_name=st.session_state.get("cloud_backup_filename", "study_backup.json"),
-                            mime="application/json",
-                            key="cloud_backup_download"
-                        )
-                    st.markdown("**📖 如何配置外部定时备份**")
-                    st.markdown("""
-- **推荐方案**：在你的 PostgreSQL 服务商（如 Supabase、Neon）控制台开启自动备份。
-- **或配置外部 cron**：定时执行 `pg_dump`，把 SQL 文件保存到对象存储。
-- **应用本身无法后台备份**：这是 Streamlit 的请求驱动架构限制；本页 JSON 导出只能在管理员打开页面时手动触发。
-- 密码哈希已原样导出，备份文件请妥善保管，不要公开分享。
-""")
+    # 内容分发
+    if selected_tab == t("tab_checkin"): render_checkin_tab(db, view_as, view_role, view_today, now)
+    elif selected_tab == t("tab_leaderboard"): render_leaderboard_tab(db, current_user, current_role, user_tz)
+    elif selected_tab == t("tab_extra"): render_extra_tab(db, view_as, current_role, now)
+    elif selected_tab == t("tab_history"): render_history_tab(db, view_as, view_role, current_role, current_user, view_today, now)
+    elif selected_tab == t("tab_shop"): render_shop_tab(db, view_as, now)
+    elif selected_tab == t("tab_redeem"): render_redeem_tab(db, view_as)
+    elif selected_tab == t("tab_exam"): render_exam_tab(db, view_as, now)
+    elif selected_tab == t("tab_event"): render_event_tab(db, view_as, view_today, now)
+    elif selected_tab == t("tab_settings"): render_settings_tab(db, view_as, view_role, current_role, current_user, user_row, all_users_data, user_tz)
 
 if __name__ == "__main__":
     main()
