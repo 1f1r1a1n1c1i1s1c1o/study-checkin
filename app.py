@@ -2358,7 +2358,34 @@ def run_app(db):
                         db.execute("INSERT INTO config_bonus_rules (owner_id, rules_json) VALUES (?,?)", (view_as, json.dumps(nb)))
                         db.commit(); st.cache_data.clear(); st.success("OK"); st.rerun()
                     except: st.error(t("op_failed"))
+                        
+        # ===== 临时数据库连接身份诊断（仅管理员、仅云端）=====
+        if is_admin(current_role) and IS_CLOUD:
+            with st.expander("🔎 数据库连接身份诊断（临时）"):
+                try:
+                    role_info = db.execute("""
+                        SELECT
+                            current_user AS app_current_user,
+                            session_user AS app_session_user,
+                            r.rolsuper AS role_is_superuser,
+                            r.rolbypassrls AS role_bypasses_rls
+                        FROM pg_roles AS r
+                        WHERE r.rolname = current_user;
+                    """).fetchone()
 
+                    if role_info:
+                        st.write("应用实际数据库角色：", role_info["app_current_user"])
+                        st.write("数据库会话角色：", role_info["app_session_user"])
+                        st.write("是否为超级用户：", role_info["role_is_superuser"])
+                        st.write("是否拥有 RLS 绕过权限：", role_info["role_bypasses_rls"])
+                    else:
+                        st.warning("查询成功，但没有取得角色信息。")
+
+                except Exception:
+                    st.error("诊断查询失败，请将此情况告知开发者。")
+
+        if is_admin(view_role):
+            st.divider(); st.markdown("### 6. 全局徽章")
         if is_admin(view_role):
             st.divider(); st.markdown("### 6. 全局徽章")
             try: existing_badges = get_badge_configs()
