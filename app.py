@@ -2386,8 +2386,6 @@ def run_app(db):
 
         if is_admin(view_role):
             st.divider(); st.markdown("### 6. 全局徽章")
-        if is_admin(view_role):
-            st.divider(); st.markdown("### 6. 全局徽章")
             try: existing_badges = get_badge_configs()
             except: existing_badges = []
             for b in existing_badges:
